@@ -35,7 +35,7 @@ CREATE TABLE users (
   role          ENUM('Kepala Sekolah','Operator/TU','Guru') NOT NULL DEFAULT 'Guru',
   departemen    VARCHAR(120) DEFAULT '',
   nip           VARCHAR(50)  DEFAULT '',
-  avatar        VARCHAR(500) DEFAULT NULL,
+  avatar        MEDIUMTEXT DEFAULT NULL,
   status        ENUM('active','menunggu_approval','nonaktif') NOT NULL DEFAULT 'menunggu_approval',
   created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
