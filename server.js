@@ -15,6 +15,7 @@ const auditRoutes        = require("./routes/audit");
 const roleRoutes         = require("./routes/roles");
 const approvalRoutes     = require("./routes/approvals");
 const dashboardRoutes    = require("./routes/dashboard");
+const chatbotRoutes      = require("./routes/chatbot");
 const { checkConnection } = require("./config/azureBlob");
 const { verifySmtp }      = require("./services/emailService");
 
@@ -73,7 +74,8 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/audit",         auditRoutes);
 app.use("/api/roles",         roleRoutes);
 app.use("/api/approvals",     approvalRoutes);
-app.use("/api/dashboard",    dashboardRoutes);
+app.use("/api/dashboard",     dashboardRoutes);
+app.use("/api/chatbot",       chatbotRoutes);
 
 // 404
 app.use((req, res) => res.status(404).json({ error: "Not Found", path: req.path }));
