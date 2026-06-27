@@ -4,7 +4,6 @@ const { authRequired }      = require("../middleware/auth");
 const { requirePermission } = require("../middleware/rbac");
 const upload                = require("../middleware/upload");
 const { uploadBufferToBlob, generateSasUrl, downloadBlobBuffer, deleteBlob } = require("../config/azureBlob");
-const { addWatermarkToPdf } = require("../services/watermarkService");
 
 const router = express.Router();
 router.use(authRequired);
@@ -113,6 +112,12 @@ router.get("/:id", async (req, res, next) => {
       }
     }
 
+    // Catat "Melihat dokumen" ke audit trail (non-blocking)
+    pool.query(
+      "INSERT INTO audit_trail (document_id, user_id, action) VALUES (?, ?, 'Melihat dokumen')",
+      [doc.id, req.user.id]
+    ).catch(() => {}); // jangan gagalkan response jika audit gagal
+
     res.json({ document: doc, auditTrail: trail, metadata });
   } catch (e) { next(e); }
 });
@@ -191,49 +196,6 @@ router.get("/:id/download-stream", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/download-protected — watermark SAKURA (PDF + gambar) ─
-router.get("/:id/download-protected", async (req, res, next) => {
-  try {
-    const [[doc]] = await pool.query(
-      "SELECT id, judul, file_blob_name, mime_type, original_filename, deleted_at FROM documents WHERE id = ?",
-      [req.params.id]
-    );
-    if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
-    if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "Blob name tidak ditemukan" });
-
-    const isImage = /^image\/(jpeg|png|gif|webp)/.test(doc.mime_type);
-    const isPdf   = doc.mime_type === "application/pdf";
-
-    if (!isPdf && !isImage) {
-      return res.status(415).json({ error: "Protected Copy hanya tersedia untuk PDF dan gambar" });
-    }
-
-    // 1. Unduh buffer asli dari Azure
-    const originalBuffer = await downloadBlobBuffer(doc.file_blob_name);
-
-    if (isPdf) {
-      // 2a. PDF: watermark server-side via pdf-lib
-      const watermarkedBuffer = await addWatermarkToPdf(originalBuffer);
-      await addAudit(pool, doc.id, req.user.id, "Mengunduh Protected Copy PDF (dengan watermark)");
-      const baseName = (doc.original_filename || doc.judul).replace(/\.pdf$/i, "");
-      const filename = encodeURIComponent(`${baseName}_protected.pdf`);
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${filename}`);
-      res.setHeader("Content-Length", watermarkedBuffer.length);
-      res.setHeader("Cache-Control", "no-store");
-      res.end(watermarkedBuffer);
-    } else {
-      await addAudit(pool, doc.id, req.user.id, "Mengunduh Protected Copy gambar (dengan watermark client-side)");
-      res.setHeader("Content-Type", doc.mime_type);
-      res.setHeader("Content-Disposition", "inline");
-      res.setHeader("Content-Length", originalBuffer.length);
-      res.setHeader("Cache-Control", "no-store");
-      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-      res.end(originalBuffer);
-    }
-  } catch (e) { next(e); }
-});
 
 // ── POST /api/documents — upload dokumen baru ─────────────────────────────────
 router.post(
@@ -438,44 +400,78 @@ router.patch("/:id", requirePermission("documents.edit"), async (req, res, next)
 router.post("/:id/approve", requirePermission("documents.approve"), async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
+    await conn.beginTransaction();
     const { comment = "" } = req.body || {};
+
     const [r] = await conn.query(
       "UPDATE documents SET status='Diarsipkan', updated_at=NOW() WHERE id=? AND status='Menunggu'",
       [req.params.id]
     );
-    if (!r.affectedRows) return res.status(400).json({ error: "Dokumen tidak dalam status Menunggu" });
-    await addAudit(conn, req.params.id, req.user.id, comment ? `Menyetujui: ${comment}` : "Menyetujui dokumen");
+    if (!r.affectedRows) {
+      await conn.rollback();
+      return res.status(400).json({ error: "Dokumen tidak dalam status Menunggu" });
+    }
+
+    // Update approval_requests yang pending untuk dokumen ini
+    await conn.query(
+      `UPDATE approval_requests
+         SET status='approved', approver_id=?, approver_note=?, decided_at=NOW()
+       WHERE document_id=? AND status='pending'`,
+      [req.user.id, comment || null, req.params.id]
+    );
+
+    await addAudit(conn, req.params.id, req.user.id, comment ? `Menyetujui dokumen: "${comment}"` : "Menyetujui dokumen");
     await addAudit(conn, req.params.id, req.user.id, "Dokumen otomatis diarsipkan setelah persetujuan");
+
     await conn.query(
       `INSERT INTO notifications (user_id, message, type, document_id)
        SELECT uploaded_by, CONCAT('Dokumen "', judul, '" telah disetujui dan diarsipkan'), 'approval', id
        FROM documents WHERE id = ?`,
       [req.params.id]
     );
+
+    await conn.commit();
     res.json({ message: "Dokumen disetujui" });
-  } catch (e) { next(e); } finally { conn.release(); }
+  } catch (e) { await conn.rollback(); next(e); } finally { conn.release(); }
 });
 
 // ── POST /api/documents/:id/reject ───────────────────────────────────────────
 router.post("/:id/reject", requirePermission("documents.reject"), async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
+    await conn.beginTransaction();
     const { reason } = req.body;
-    if (!reason) return res.status(400).json({ error: "reason wajib diisi" });
+    if (!reason) { await conn.rollback(); return res.status(400).json({ error: "reason wajib diisi" }); }
+
     const [r] = await conn.query(
       "UPDATE documents SET status='Ditolak', catatan=?, updated_at=NOW() WHERE id=? AND status='Menunggu'",
       [reason, req.params.id]
     );
-    if (!r.affectedRows) return res.status(400).json({ error: "Dokumen tidak dalam status Menunggu" });
+    if (!r.affectedRows) {
+      await conn.rollback();
+      return res.status(400).json({ error: "Dokumen tidak dalam status Menunggu" });
+    }
+
+    // Update approval_requests yang pending untuk dokumen ini
+    await conn.query(
+      `UPDATE approval_requests
+         SET status='rejected', approver_id=?, approver_note=?, decided_at=NOW()
+       WHERE document_id=? AND status='pending'`,
+      [req.user.id, reason, req.params.id]
+    );
+
     await addAudit(conn, req.params.id, req.user.id, `Menolak dokumen: ${reason}`);
+
     await conn.query(
       `INSERT INTO notifications (user_id, message, type, document_id)
        SELECT uploaded_by, CONCAT('Dokumen "', judul, '" telah ditolak'), 'rejection', id
        FROM documents WHERE id = ?`,
       [req.params.id]
     );
+
+    await conn.commit();
     res.json({ message: "Dokumen ditolak" });
-  } catch (e) { next(e); } finally { conn.release(); }
+  } catch (e) { await conn.rollback(); next(e); } finally { conn.release(); }
 });
 
 // ── DELETE /api/documents/:id — soft delete (trash) ──────────────────────────

@@ -15,6 +15,8 @@ const auditRoutes        = require("./routes/audit");
 const roleRoutes         = require("./routes/roles");
 const approvalRoutes     = require("./routes/approvals");
 const dashboardRoutes    = require("./routes/dashboard");
+const presenceRoutes     = require("./routes/presence");
+const chatbotRoutes      = require("./routes/chatbotRoutes"); // ← BARU
 const { checkConnection } = require("./config/azureBlob");
 const { verifySmtp }      = require("./services/emailService");
 
@@ -60,6 +62,9 @@ app.get("/", (_req, res) => {
       <li><code>POST /api/auth/disable-2fa</code> (perlu JWT)</li>
       <li><code>GET  /api/documents</code> (perlu JWT)</li>
       <li><code>POST /api/approvals</code></li>
+      <li><code>POST /api/presence/heartbeat</code> (perlu JWT)</li>
+      <li><code>GET  /api/presence/status</code> (perlu JWT)</li>
+      <li><code>POST /api/chatbot</code> (perlu JWT)</li>
     </ul>
   `);
 });
@@ -73,7 +78,9 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/audit",         auditRoutes);
 app.use("/api/roles",         roleRoutes);
 app.use("/api/approvals",     approvalRoutes);
-app.use("/api/dashboard",    dashboardRoutes);
+app.use("/api/dashboard",     dashboardRoutes);
+app.use("/api/presence",      presenceRoutes);
+app.use("/api/chatbot",       chatbotRoutes); // ← BARU
 
 // 404
 app.use((req, res) => res.status(404).json({ error: "Not Found", path: req.path }));

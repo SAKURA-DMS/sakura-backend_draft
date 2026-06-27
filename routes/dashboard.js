@@ -163,6 +163,7 @@ router.get("/activity", async (req, res, next) => {
         time:        r.time,
         docId:       r.doc_id,
         docTitle:    r.doc_title,
+        userId:      r.user_id,
         userName:    r.user_name || "—",
         userRole:    r.user_role || "—",
         userAvatar:  r.user_avatar || null,
