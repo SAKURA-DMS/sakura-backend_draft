@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAKURA (Secure Archiving and Keeping of Unified Records for Administration)</title>
+</head>
+<body style="margin:0; padding:0; background:#f4f6fa; font-family:Arial, Helvetica, sans-serif; color:#2f2f35;">
+  <div style="max-width:640px; margin:32px auto; background:#ffffff; border:1px solid #e7e7ef; border-radius:18px; overflow:hidden; box-shadow:0 8px 28px rgba(18, 24, 40, .08);">
+
+    <!-- Banner -->
+<div style="background:#f9e7ef;">
+  <img
+    src="./sakura_branch.png"
+    alt="Sakura branch"
+    style="
+      display:block;
+      width:100%;
+      height:180px;
+      object-fit:cover;
+      object-position:center top;
+      filter:saturate(1.08) contrast(1.03);
+    "
+  />
+</div>
+
+<!-- Logo & Branding -->
+<div
+  style="
+    background:#ffffff;
+    padding:22px 30px;
+    border-bottom:1px solid #ececf3;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    gap:16px;
+  "
+>
+
+  <img
+    src="./logo_sakura.png"
+    alt="Logo SAKURA"
+    style="
+      width:54px;
+      height:54px;
+      object-fit:contain;
+    "
+  />
+
+  <div
+    style="
+      font-size:34px;
+      font-weight:700;
+      color:#8c3555;
+      letter-spacing:1px;
+      line-height:1;
+    "
+  >
+    SAKURA
+  </div>
+
+</div>
+
+    <!-- Body -->
+    <div style="padding:34px 34px 30px;">
+      <p style="margin:0 0 12px; font-size:15px; line-height:1.7;">Halo, <strong>${namaUser}</strong>,</p>
+      <p style="margin:0 0 22px; font-size:14px; line-height:1.8; color:#4e4e5a;">
+        Kode berikut digunakan untuk verifikasi akun SAKURA saat login atau aktivasi keamanan dua langkah.
+      </p>
+
+      <div style="max-width:360px; margin:0 auto 22px; border:1px solid #ead7df; background:#fff8fb; border-radius:14px; text-align:center; padding:20px 18px;">
+        <div style="font-size:11px; color:#9a6a7a; text-transform:uppercase; letter-spacing:1px; margin-bottom:10px;">Kode OTP</div>
+        <div style="font-size:38px; font-weight:800; letter-spacing:10px; color:#8c3555; font-family:'Courier New', monospace; margin-bottom:6px;">${otpCode}</div>
+        <div style="font-size:12px; color:#75757f;">Berlaku selama <strong>${expiryMin} menit</strong></div>
+      </div>
+
+      <div style="background:#fff8e8; border-left:4px solid #e1b23c; border-radius:8px; padding:13px 15px; font-size:13px; line-height:1.7; color:#6a5a22; margin-bottom:22px;">
+        Jangan bagikan kode ini kepada siapa pun. Tim SAKURA tidak pernah meminta kode OTP Anda.
+        Jika Anda tidak merasa meminta kode ini, abaikan email ini.
+      </div>
+
+      <p style="margin:0; font-size:14px; line-height:1.8; color:#4e4e5a;">
+        Masukkan kode di atas pada halaman verifikasi yang sedang terbuka. Kode hanya dapat digunakan satu kali.
+      </p>
+    </div>
+
+    <!-- Footer -->
+    <div style="padding:16px 34px; border-top:1px solid #ececf3; background:#fbfbfd; text-align:center; font-size:12px; color:#9a9aa5;">
+      © 2026 SAKURA · Email ini dibuat otomatis, jangan dibalas.
+    </div>
+  </div>
+</body>
+</html>

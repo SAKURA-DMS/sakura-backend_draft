@@ -241,19 +241,37 @@ router.post(
       // 1. Generate nomor dokumen (dengan lock counter)
       const nomor = await generateDocumentNumber(conn, type_id);
 
+      // Generate ID manual untuk TiDB
+      const [[maxRow]] = await conn.query(
+        "SELECT COALESCE(MAX(id),0)+1 AS nextId FROM documents"
+      );
+
+      const nextId = maxRow.nextId;
+
       // 2. Insert dokumen
       const [ins] = await conn.query(
         `INSERT INTO documents
-         (judul, nomor_dokumen, category_id, type_id, folder_id, tahun_ajaran,
-          status, versi, uploaded_by,
-          file_url, file_blob_name, file_size, mime_type, original_filename, catatan)
-         VALUES (?, ?, ?, ?, ?, ?, 'Menunggu', 1, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          judul, nomor, category_id, type_id, folder_id || null, tahun_ajaran || null,
-          req.user.id,
-          blob.url, blob.blobName, blob.size, blob.mimeType, req.file.originalname,
-          catatan || null,
-        ]
+          (id,
+            judul, nomor_dokumen, category_id, type_id, folder_id, tahun_ajaran,
+            status, versi, uploaded_by,
+            file_url, file_blob_name, file_size, mime_type, original_filename, catatan)
+          VALUES
+          (?, ?, ?, ?, ?, ?, ?, 'Menunggu', 1, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            judul,
+            nomor,
+            category_id,
+            type_id,
+            folder_id || null,
+            tahun_ajaran || null,
+            req.user.id,
+            blob.url,
+            blob.blobName,
+            blob.size,
+            blob.mimeType,
+            req.file.originalname,
+            catatan || null,
+          ]
       );
       const docId = ins.insertId;
 
