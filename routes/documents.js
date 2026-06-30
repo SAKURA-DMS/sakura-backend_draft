@@ -313,6 +313,7 @@ router.post(
           VALUES
           (?, ?, ?, ?, ?, ?, ?, 'Menunggu', 1, ?, ?, ?, ?, ?, ?, ?)`,
           [
+            nextId,
             judul,
             nomor,
             category_id,
@@ -328,7 +329,7 @@ router.post(
             catatan || null,
           ]
       );
-      const docId = ins.insertId;
+      const docId = nextId;
 
       // 3. Insert metadata per kategori
       await insertMetadata(conn, docId, Number(category_id), Number(type_id), parsedMeta);
