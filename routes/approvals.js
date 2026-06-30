@@ -35,10 +35,63 @@ async function getApprovers(conn, excludeUserId) {
   return rows.map((r) => r.id);
 }
 
+// Membersihkan approval_requests yang "yatim": statusnya masih 'pending'
+// tapi dokumen terkait sudah tidak lagi berstatus 'Menunggu' (sudah diputuskan
+// lewat jalur lain, mis. endpoint /api/documents/:id/approve, atau data lama).
+// Tanpa pembersihan ini baris tersebut akan terus muncul di antrian pending
+// padahal dokumennya sudah final, dan riwayat di tab "Disetujui/Ditolak" tidak
+// pernah terisi karena baris approval_requests-nya tidak ikut terupdate.
+async function reconcileOrphanPendingRequests(conn, documentId = null) {
+  const where = documentId
+    ? "ar.status = 'pending' AND ar.document_id = ? AND d.status != 'Menunggu'"
+    : "ar.status = 'pending' AND d.status != 'Menunggu'";
+  const params = documentId ? [documentId] : [];
+
+  const [orphans] = await conn.query(
+    `SELECT ar.id, ar.document_id, d.status AS doc_status
+     FROM approval_requests ar
+     JOIN documents d ON d.id = ar.document_id
+     WHERE ${where}`,
+    params
+  );
+
+  for (const o of orphans) {
+    const resolvedStatus = o.doc_status === "Ditolak" ? "rejected" : "approved";
+    await conn.query(
+      `UPDATE approval_requests
+         SET status = ?, decided_at = COALESCE(decided_at, NOW())
+       WHERE id = ?`,
+      [resolvedStatus, o.id]
+    );
+    await addAudit(
+      conn, o.document_id, null,
+      "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
+      o.id
+    );
+  }
+  return orphans;
+}
+
 // ── GET /api/approvals — list request ─────────────────────────────────────────
 router.get("/", requirePermission("approvals.view"), async (req, res, next) => {
   try {
     const { status, document_id, requester_id, limit = 100, offset = 0 } = req.query;
+
+    // Self-heal: rapikan dulu baris pending yang dokumennya sudah final
+    // (mis. sudah disetujui/ditolak lewat jalur lain) agar antrian pending,
+    // riwayat disetujui/ditolak, dan badge count selalu konsisten.
+    const cleanupConn = await pool.getConnection();
+    try {
+      await cleanupConn.beginTransaction();
+      await reconcileOrphanPendingRequests(cleanupConn, document_id || null);
+      await cleanupConn.commit();
+    } catch (cleanupErr) {
+      await cleanupConn.rollback();
+      console.error("[approvals] Gagal reconcile orphan pending requests:", cleanupErr.message);
+    } finally {
+      cleanupConn.release();
+    }
+
     const where  = [];
     const params = [];
 
@@ -266,14 +319,37 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       return res.status(409).json({ error: `Request sudah berstatus '${ar.status}', tidak dapat disetujui` });
     }
 
-    // Validasi dokumen masih 'Menunggu'
+    // Validasi dokumen masih 'Menunggu'. Jika dokumen sudah final (mis. sudah
+    // diputuskan lewat endpoint lain atau data lama), jangan macet dengan error
+    // generik — selaraskan saja status request ini supaya konsisten lalu kabari
+    // pengguna apa yang sebenarnya terjadi.
     const [[doc]] = await conn.query(
       "SELECT id, judul, status, uploaded_by FROM documents WHERE id = ? FOR UPDATE",
       [ar.document_id]
     );
-    if (!doc || doc.status !== "Menunggu") {
+    if (!doc) {
       await conn.rollback();
-      return res.status(409).json({ error: "Dokumen tidak dalam status Menunggu" });
+      return res.status(404).json({ error: "Dokumen terkait tidak ditemukan" });
+    }
+    if (doc.status !== "Menunggu") {
+      const resolvedStatus = doc.status === "Ditolak" ? "rejected" : "approved";
+      await conn.query(
+        `UPDATE approval_requests
+           SET status = ?, decided_at = COALESCE(decided_at, NOW())
+         WHERE id = ?`,
+        [resolvedStatus, ar.id]
+      );
+      await addAudit(
+        conn, ar.document_id, req.user.id,
+        "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
+        ar.id
+      );
+      await conn.commit();
+      return res.status(409).json({
+        error: `Dokumen ini sudah berstatus '${doc.status}' (diputuskan sebelumnya), permintaan persetujuan ini sudah disinkronkan otomatis dan tidak perlu ditindaklanjuti lagi.`,
+        already_resolved: true,
+        document_status: doc.status,
+      });
     }
 
     // Update approval_request
@@ -288,6 +364,15 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
     await conn.query(
       "UPDATE documents SET status = 'Diarsipkan', updated_at = NOW() WHERE id = ?",
       [ar.document_id]
+    );
+
+    // Selesaikan juga approval_requests pending lain untuk dokumen yang sama
+    // (jika ada duplikat) agar tidak ada baris yatim yang tersisa di antrian.
+    await conn.query(
+      `UPDATE approval_requests
+         SET status = 'approved', approver_id = ?, decided_at = NOW()
+       WHERE document_id = ? AND status = 'pending' AND id != ?`,
+      [req.user.id, ar.document_id, ar.id]
     );
 
     // Audit (dua entry: keputusan + otomatis arsip)
@@ -337,14 +422,35 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       return res.status(409).json({ error: `Request sudah berstatus '${ar.status}', tidak dapat ditolak` });
     }
 
-    // Validasi dokumen
+    // Validasi dokumen. Jika sudah final lewat jalur lain, selaraskan saja
+    // daripada memberi error yang tidak bisa ditindaklanjuti dari UI.
     const [[doc]] = await conn.query(
       "SELECT id, judul, status, uploaded_by FROM documents WHERE id = ? FOR UPDATE",
       [ar.document_id]
     );
-    if (!doc || doc.status !== "Menunggu") {
+    if (!doc) {
       await conn.rollback();
-      return res.status(409).json({ error: "Dokumen tidak dalam status Menunggu" });
+      return res.status(404).json({ error: "Dokumen terkait tidak ditemukan" });
+    }
+    if (doc.status !== "Menunggu") {
+      const resolvedStatus = doc.status === "Ditolak" ? "rejected" : "approved";
+      await conn.query(
+        `UPDATE approval_requests
+           SET status = ?, decided_at = COALESCE(decided_at, NOW())
+         WHERE id = ?`,
+        [resolvedStatus, ar.id]
+      );
+      await addAudit(
+        conn, ar.document_id, req.user.id,
+        "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
+        ar.id
+      );
+      await conn.commit();
+      return res.status(409).json({
+        error: `Dokumen ini sudah berstatus '${doc.status}' (diputuskan sebelumnya), permintaan persetujuan ini sudah disinkronkan otomatis dan tidak perlu ditindaklanjuti lagi.`,
+        already_resolved: true,
+        document_status: doc.status,
+      });
     }
 
     // Update approval_request
@@ -359,6 +465,14 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
     await conn.query(
       "UPDATE documents SET status = 'Ditolak', catatan = ?, updated_at = NOW() WHERE id = ?",
       [reason.trim(), ar.document_id]
+    );
+
+    // Selesaikan juga approval_requests pending lain untuk dokumen yang sama
+    await conn.query(
+      `UPDATE approval_requests
+         SET status = 'rejected', approver_id = ?, approver_note = ?, decided_at = NOW()
+       WHERE document_id = ? AND status = 'pending' AND id != ?`,
+      [req.user.id, reason.trim(), ar.document_id, ar.id]
     );
 
     // Audit

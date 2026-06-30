@@ -14,7 +14,10 @@ router.use(authRequired);
 router.get("/", requirePermission("users.view"), async (_req, res, next) => {
   try {
     const [rows] = await pool.query(
-      `SELECT id, nama, email, role, departemen, nip, avatar, status, created_at
+      `SELECT id, nama, email, role, departemen, nip, avatar, status, created_at,
+              (is_online = 1 AND last_seen_at IS NOT NULL
+                 AND last_seen_at >= DATE_SUB(NOW(), INTERVAL 45 SECOND)) AS is_online,
+              last_seen_at
        FROM users
        WHERE status != 'menunggu_approval'
        ORDER BY created_at DESC`

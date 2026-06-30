@@ -25,17 +25,4 @@ router.get("/", requirePermission("audit.view"), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// POST /api/audit — tambah catatan admin pada dokumen
-router.post("/", requirePermission("audit.addNote"), async (req, res, next) => {
-  try {
-    const { document_id, note } = req.body;
-    if (!document_id || !note) return res.status(400).json({ error: "document_id & note wajib" });
-    await pool.query(
-      "INSERT INTO audit_trail (document_id, user_id, action) VALUES (?, ?, ?)",
-      [document_id, req.user.id, `Catatan Admin: ${note}`]
-    );
-    res.status(201).json({ message: "Catatan ditambahkan" });
-  } catch (e) { next(e); }
-});
-
 module.exports = router;
