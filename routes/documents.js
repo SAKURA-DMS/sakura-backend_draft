@@ -4,6 +4,7 @@ const { authRequired }      = require("../middleware/auth");
 const { requirePermission } = require("../middleware/rbac");
 const upload                = require("../middleware/upload");
 const { uploadBufferToBlob, generateSasUrl, downloadBlobBuffer, deleteBlob } = require("../config/azureBlob");
+const { generateAuditHash } = require("../utils/auditHash");
 
 const router = express.Router();
 router.use(authRequired);
@@ -35,11 +36,65 @@ async function generateDocumentNumber(conn, typeId) {
   return `${t.code_prefix}/${year}/${String(next).padStart(3, "0")}`;
 }
 
-async function addAudit(conn, docId, userId, action, approvalRequestId = null) {
-  await conn.query(
-    "INSERT INTO audit_trail (document_id, approval_request_id, user_id, action) VALUES (?, ?, ?, ?)",
-    [docId, approvalRequestId || null, userId, action]
-  );
+async function addAudit(
+  conn,
+  docId,
+  userId,
+  action,
+  approvalRequestId = null,
+  oldValue = null,
+  newValue = null
+) {
+
+  const [[lastAudit]] = await conn.query(`
+    SELECT current_hash
+    FROM audit_trail
+    ORDER BY id DESC
+    LIMIT 1
+  `);
+
+  const previousHash =
+    lastAudit?.current_hash || "";
+
+  const auditData = {
+    document_id: docId,
+    approval_request_id: approvalRequestId,
+    user_id: userId,
+    action,
+    old_value: oldValue,
+    new_value: newValue,
+    created_at: new Date()
+  };
+
+  const currentHash =
+    generateAuditHash(
+      auditData,
+      previousHash
+    );
+
+  await conn.query(`
+    INSERT INTO audit_trail
+    (
+      document_id,
+      approval_request_id,
+      user_id,
+      action,
+      previous_hash,
+      current_hash,
+      old_value,
+      new_value
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    docId,
+    approvalRequestId || null,
+    userId,
+    action,
+    previousHash,
+    currentHash,
+    oldValue ? JSON.stringify(oldValue) : null,
+    newValue ? JSON.stringify(newValue) : null
+  ]);
 }
 
 // ── GET /api/documents — list dengan filter ───────────────────────────────────
@@ -279,8 +334,18 @@ router.post(
       await insertMetadata(conn, docId, Number(category_id), Number(type_id), parsedMeta);
 
       // 4. Audit: upload
-      await addAudit(conn, docId, req.user.id,
-        `Mengunggah dokumen (${req.file.originalname}, ${(blob.size / 1024).toFixed(1)} KB, ${blob.mimeType})`
+      await addAudit(
+          conn,
+          docId,
+          req.user.id,
+          `Mengunggah dokumen (${req.file.originalname}, ${(blob.size / 1024).toFixed(1)} KB, ${blob.mimeType})`,
+          null,
+          null,
+          {
+              status: "Menunggu",
+              versi: 1,
+              filename: req.file.originalname
+          }
       );
 
       // 5. Auto-create approval_request agar dokumen muncul di halaman persetujuan
@@ -292,7 +357,17 @@ router.post(
       const requestId = aprIns.insertId;
 
       // Audit: pengajuan persetujuan otomatis
-      await addAudit(conn, docId, req.user.id, "Mengajukan persetujuan dokumen", requestId);
+      await addAudit(
+          conn,
+          docId,
+          req.user.id,
+          "Mengajukan persetujuan dokumen",
+          requestId,
+          null,
+          {
+              status: "Menunggu"
+          }
+      );
 
       // 6. Notifikasi ke approver (Kepala Sekolah & Operator/TU aktif)
       await conn.query(
@@ -372,8 +447,20 @@ router.patch(
         [newBlob.url, newBlob.blobName, newBlob.size, newBlob.mimeType, req.file.originalname, newVersi, doc.id]
       );
 
-      await addAudit(conn, doc.id, req.user.id,
-        `Mengganti file (versi ${newVersi}: ${req.file.originalname}, ${(newBlob.size / 1024).toFixed(1)} KB)`
+      await addAudit(
+          conn,
+          doc.id,
+          req.user.id,
+          `Mengganti file (versi ${newVersi}: ${req.file.originalname}, ${(newBlob.size / 1024).toFixed(1)} KB)`,
+          null,
+          {
+              versi: doc.versi,
+              filename: doc.file_blob_name
+          },
+          {
+              versi: newVersi,
+              filename: req.file.originalname
+          }
       );
 
       await conn.commit();
@@ -395,6 +482,16 @@ router.patch(
 
 // ── PATCH /api/documents/:id — edit metadata dasar ───────────────────────────
 router.patch("/:id", requirePermission("documents.edit"), async (req, res, next) => {
+  const [[oldDoc]] = await conn.query(
+      `SELECT
+          judul,
+          catatan,
+          folder_id,
+          tahun_ajaran
+      FROM documents
+      WHERE id=?`,
+      [req.params.id]
+  );
   const conn = await pool.getConnection();
   try {
     const { judul, catatan, folder_id, tahun_ajaran } = req.body;
@@ -409,7 +506,20 @@ router.patch("/:id", requirePermission("documents.edit"), async (req, res, next)
       [judul || null, catatan || null, folder_id || null, tahun_ajaran || null, req.params.id]
     );
     if (!r.affectedRows) return res.status(404).json({ error: "Dokumen tidak ditemukan atau sudah dihapus" });
-    await addAudit(conn, req.params.id, req.user.id, "Mengedit metadata dokumen");
+    await addAudit(
+        conn,
+        req.params.id,
+        req.user.id,
+        "Mengedit metadata dokumen",
+        null,
+        oldDoc,
+        {
+            judul: judul ?? oldDoc.judul,
+            catatan: catatan ?? oldDoc.catatan,
+            folder_id: folder_id ?? oldDoc.folder_id,
+            tahun_ajaran: tahun_ajaran ?? oldDoc.tahun_ajaran
+        }
+    );
     res.json({ message: "Dokumen diperbarui" });
   } catch (e) { next(e); } finally { conn.release(); }
 });
@@ -438,8 +548,34 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       [req.user.id, comment || null, req.params.id]
     );
 
-    await addAudit(conn, req.params.id, req.user.id, comment ? `Menyetujui dokumen: "${comment}"` : "Menyetujui dokumen");
-    await addAudit(conn, req.params.id, req.user.id, "Dokumen otomatis diarsipkan setelah persetujuan");
+    await addAudit(
+        conn,
+        req.params.id,
+        req.user.id,
+        comment
+          ? `Menyetujui dokumen: "${comment}"`
+          : "Menyetujui dokumen",
+        null,
+        {
+            status: "Menunggu"
+        },
+        {
+            status: "Disetujui"
+        }
+    );
+    await addAudit(
+        conn,
+        req.params.id,
+        req.user.id,
+        "Dokumen otomatis diarsipkan setelah persetujuan",
+        null,
+        {
+            status: "Disetujui"
+        },
+        {
+            status: "Diarsipkan"
+        }
+    );
 
     await conn.query(
       `INSERT INTO notifications (user_id, message, type, document_id)
@@ -478,7 +614,20 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       [req.user.id, reason, req.params.id]
     );
 
-    await addAudit(conn, req.params.id, req.user.id, `Menolak dokumen: ${reason}`);
+    await addAudit(
+        conn,
+        req.params.id,
+        req.user.id,
+        `Menolak dokumen: ${reason}`,
+        null,
+        {
+            status: "Menunggu"
+        },
+        {
+            status: "Ditolak",
+            alasan: reason
+        }
+    );
 
     await conn.query(
       `INSERT INTO notifications (user_id, message, type, document_id)
@@ -500,7 +649,19 @@ router.delete("/:id", requirePermission("documents.delete"), async (req, res, ne
       [req.params.id]
     );
     if (!r.affectedRows) return res.status(404).json({ error: "Dokumen tidak ditemukan atau sudah dihapus" });
-    await addAudit(pool, req.params.id, req.user.id, "Memindahkan dokumen ke tempat sampah");
+    await addAudit(
+        pool,
+        req.params.id,
+        req.user.id,
+        "Memindahkan dokumen ke tempat sampah",
+        null,
+        {
+            deleted: false
+        },
+        {
+            deleted: true
+        }
+    );
     res.json({ message: "Dokumen dipindahkan ke tempat sampah" });
   } catch (e) { next(e); }
 });
@@ -509,7 +670,19 @@ router.delete("/:id", requirePermission("documents.delete"), async (req, res, ne
 router.post("/:id/restore", requirePermission("documents.delete"), async (req, res, next) => {
   try {
     await pool.query("UPDATE documents SET deleted_at = NULL WHERE id = ?", [req.params.id]);
-    await addAudit(pool, req.params.id, req.user.id, "Memulihkan dokumen dari tempat sampah");
+    await addAudit(
+        pool,
+        req.params.id,
+        req.user.id,
+        "Memulihkan dokumen dari tempat sampah",
+        null,
+        {
+            deleted: true
+        },
+        {
+            deleted: false
+        }
+    );
     res.json({ message: "Dokumen dipulihkan" });
   } catch (e) { next(e); }
 });
