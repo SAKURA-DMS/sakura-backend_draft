@@ -2,17 +2,72 @@ const express = require("express");
 const pool    = require("../config/db");
 const { authRequired }      = require("../middleware/auth");
 const { requirePermission } = require("../middleware/rbac");
+const { generateAuditHash } = require("../utils/auditHash");
 
 const router = express.Router();
 router.use(authRequired);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function addAudit(conn, docId, userId, action, approvalRequestId = null) {
-  await conn.query(
-    "INSERT INTO audit_trail (document_id, approval_request_id, user_id, action) VALUES (?, ?, ?, ?)",
-    [docId, approvalRequestId || null, userId, action]
-  );
+async function addAudit(
+  conn,
+  docId,
+  userId,
+  action,
+  approvalRequestId = null,
+  oldValue = null,
+  newValue = null
+) {
+
+  const [[lastAudit]] = await conn.query(`
+    SELECT current_hash
+    FROM audit_trail
+    ORDER BY id DESC
+    LIMIT 1
+  `);
+
+  const previousHash =
+    lastAudit?.current_hash || "";
+
+  const auditData = {
+    document_id: docId,
+    approval_request_id: approvalRequestId,
+    user_id: userId,
+    action,
+    old_value: oldValue,
+    new_value: newValue,
+    created_at: new Date()
+  };
+
+  const currentHash =
+    generateAuditHash(
+      auditData,
+      previousHash
+    );
+
+  await conn.query(`
+    INSERT INTO audit_trail
+    (
+      document_id,
+      approval_request_id,
+      user_id,
+      action,
+      previous_hash,
+      current_hash,
+      old_value,
+      new_value
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    docId,
+    approvalRequestId || null,
+    userId,
+    action,
+    previousHash,
+    currentHash,
+    oldValue ? JSON.stringify(oldValue) : null,
+    newValue ? JSON.stringify(newValue) : null
+  ]);
 }
 
 async function sendNotif(conn, userIds, message, type, docId) {
@@ -64,9 +119,13 @@ async function reconcileOrphanPendingRequests(conn, documentId = null) {
       [resolvedStatus, o.id]
     );
     await addAudit(
-      conn, o.document_id, null,
+      conn,
+      o.document_id,
+      null,
       "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
-      o.id
+      o.id,
+      { status: "Menunggu" },
+      { status: o.doc_status }
     );
   }
   return orphans;
@@ -276,7 +335,7 @@ router.post("/", requirePermission("approvals.manage"), async (req, res, next) =
     const auditMsg = requester_note
       ? `Mengajukan persetujuan: "${requester_note}"`
       : "Mengajukan persetujuan dokumen";
-    await addAudit(conn, document_id, req.user.id, auditMsg, requestId);
+    await addAudit(conn, document_id, req.user.id, auditMsg, requestId, { status: "Menunggu" });
 
     // Notifikasi ke semua approver
     const approverIds = await getApprovers(conn, req.user.id);
@@ -342,7 +401,9 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       await addAudit(
         conn, ar.document_id, req.user.id,
         "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
-        ar.id
+        ar.id,
+        { status: "Menunggu" },
+        { status: doc.status }
       );
       await conn.commit();
       return res.status(409).json({
@@ -379,8 +440,8 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
     const approveMsg = comment
       ? `Menyetujui dokumen: "${comment}"`
       : "Menyetujui dokumen";
-    await addAudit(conn, ar.document_id, req.user.id, approveMsg, ar.id);
-    await addAudit(conn, ar.document_id, req.user.id, "Dokumen otomatis diarsipkan setelah persetujuan", ar.id);
+    await addAudit(conn, ar.document_id, req.user.id, approveMsg, ar.id, { status: "Menunggu" }, { status: "Disetujui" });
+    await addAudit(conn, ar.document_id, req.user.id, "Dokumen otomatis diarsipkan setelah persetujuan", ar.id, { status: "Disetujui" }, { status: "Diarsipkan" });
 
     // Notifikasi ke requester (uploader)
     await sendNotif(
@@ -443,7 +504,9 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       await addAudit(
         conn, ar.document_id, req.user.id,
         "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
-        ar.id
+        ar.id,
+        { status: "Menunggu" },
+        { status: doc.status }
       );
       await conn.commit();
       return res.status(409).json({
@@ -476,7 +539,7 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
     );
 
     // Audit
-    await addAudit(conn, ar.document_id, req.user.id, `Menolak dokumen: "${reason.trim()}"`, ar.id);
+    await addAudit(conn, ar.document_id, req.user.id, `Menolak dokumen: "${reason.trim()}"`, ar.id, { status: "Menunggu" }, { status: "Ditolak", alasan: reason.trim() });
 
     // Notifikasi ke requester
     await sendNotif(
@@ -533,7 +596,7 @@ router.post("/:id/cancel", requirePermission("approvals.manage"), async (req, re
     );
 
     // Audit
-    await addAudit(conn, ar.document_id, req.user.id, "Membatalkan pengajuan persetujuan", ar.id);
+    await addAudit(conn, ar.document_id, req.user.id, "Membatalkan pengajuan persetujuan", ar.id, { status: "Menunggu" }, { status: "Dibatalkan" });
 
     await conn.commit();
     res.json({ message: "Approval request dibatalkan", request_id: ar.id });
