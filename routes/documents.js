@@ -54,7 +54,9 @@ async function addAudit(
   `);
 
   const previousHash =
-    lastAudit?.current_hash || "";
+    lastAudit && lastAudit.current_hash
+      ? lastAudit.current_hash
+      : "";
 
   const auditData = {
     document_id: docId,
@@ -483,17 +485,19 @@ router.patch(
 
 // ── PATCH /api/documents/:id — edit metadata dasar ───────────────────────────
 router.patch("/:id", requirePermission("documents.edit"), async (req, res, next) => {
-  const [[oldDoc]] = await conn.query(
-      `SELECT
-          judul,
-          catatan,
-          folder_id,
-          tahun_ajaran
-      FROM documents
-      WHERE id=?`,
-      [req.params.id]
-  );
   const conn = await pool.getConnection();
+
+  const [[oldDoc]] = await conn.query(
+    `SELECT
+      judul,
+      catatan,
+      folder_id,
+      tahun_ajaran
+    FROM documents
+    WHERE id=?`,
+    [req.params.id]
+  );
+
   try {
     const { judul, catatan, folder_id, tahun_ajaran } = req.body;
     const [r] = await conn.query(
@@ -515,10 +519,10 @@ router.patch("/:id", requirePermission("documents.edit"), async (req, res, next)
         null,
         oldDoc,
         {
-            judul: judul ?? oldDoc.judul,
-            catatan: catatan ?? oldDoc.catatan,
-            folder_id: folder_id ?? oldDoc.folder_id,
-            tahun_ajaran: tahun_ajaran ?? oldDoc.tahun_ajaran
+          judul: judul !== undefined ? judul : oldDoc.judul,
+          catatan: catatan !== undefined ? catatan : oldDoc.catatan,
+          folder_id: folder_id !== undefined ? folder_id : oldDoc.folder_id,
+          tahun_ajaran: tahun_ajaran !== undefined ? tahun_ajaran : oldDoc.tahun_ajaran
         }
     );
     res.json({ message: "Dokumen diperbarui" });
