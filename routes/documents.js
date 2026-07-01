@@ -33,7 +33,32 @@ async function generateDocumentNumber(conn, typeId) {
       [t.code_prefix, year]
     );
   }
-  return `${t.code_prefix}/${year}/${String(next).padStart(3, "0")}`;
+  const [[category]] =
+    await conn.query(
+      `
+      SELECT c.category_name
+      FROM document_types dt
+      JOIN categories c
+        ON c.category_id =
+          dt.category_id
+      WHERE dt.type_id = ?
+      `,
+      [typeId]
+    );
+
+  const categoryPrefix = {
+    "Data Siswa": "DS",
+    "Data Guru": "DG",
+    "Inventaris": "INV",
+    "Surat Menyurat": "SMT",
+  };
+
+  const cat =
+    categoryPrefix[
+      category?.category_name
+    ] || "DOC";
+
+  return `${cat}-${t.code_prefix}/${year}/${String(next).padStart(3,"0")}`;
 }
 
 async function addAudit(
