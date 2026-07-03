@@ -62,18 +62,23 @@ CREATE TABLE `audit_trail` (
 
 CREATE TABLE `categories` (
   `category_id` int(11) NOT NULL,
-  `category_name` varchar(100) NOT NULL
+  `category_name` varchar(100) NOT NULL,
+  -- Kode prefix kategori untuk sistem penomoran dokumen otomatis
+  -- (format: [KODE_KATEGORI]-[KODE_JENIS]-[TAHUN]-[RUNNING_NUMBER])
+  `code_prefix` varchar(10) NOT NULL DEFAULT 'OTH'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `categories`
 --
 
-INSERT INTO `categories` (`category_id`, `category_name`) VALUES
-(2, 'Data Guru'),
-(1, 'Data Siswa'),
-(3, 'Sarana Prasarana'),
-(4, 'Surat Menyurat');
+INSERT INTO `categories` (`category_id`, `category_name`, `code_prefix`) VALUES
+(2, 'Data Guru', 'DG'),
+(1, 'Data Siswa', 'DS'),
+(3, 'Sarana Prasarana', 'INV'),
+(4, 'Surat Menyurat', 'SM'),
+(5, 'Administrasi', 'ADM'),
+(6, 'Lainnya', 'OTH');
 
 -- --------------------------------------------------------
 
@@ -146,7 +151,14 @@ INSERT INTO `document_types` (`type_id`, `category_id`, `type_name`, `code_prefi
 (10, 4, 'Buku Agenda Surat Masuk', 'ASM'),
 (11, 4, 'Buku Agenda Surat Keluar', 'ASK'),
 (12, 4, 'Kumpulan Surat Keputusan (SK)', 'KSK'),
-(13, 4, 'Lainnya', 'LNR');
+(13, 4, 'Lainnya', 'OTH'),
+-- Opsi "Lainnya" ditambahkan di tiap kategori supaya fallback kode OTH
+-- (poin 8 requirement penomoran dokumen) selalu tersedia di semua kategori.
+(14, 1, 'Lainnya', 'OTH'),
+(15, 2, 'Lainnya', 'OTH'),
+(16, 3, 'Lainnya', 'OTH'),
+(17, 5, 'Lainnya', 'OTH'),
+(18, 6, 'Lainnya', 'OTH');
 
 -- --------------------------------------------------------
 

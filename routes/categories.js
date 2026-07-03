@@ -32,11 +32,13 @@ router.post("/custom", async (req, res, next) => {
       return res.json({ category: existing[0], already_exists: true });
     }
 
+    // Kategori custom ("Lainnya") selalu pakai kode OTH untuk penomoran
+    // dokumen (poin 8 requirement), berapapun nama yang diketik user.
     const [result] = await pool.query(
-      "INSERT INTO categories (category_name) VALUES (?)",
+      "INSERT INTO categories (category_name, code_prefix) VALUES (?, 'OTH')",
       [name]
     );
-    const newCategory = { category_id: result.insertId, category_name: name };
+    const newCategory = { category_id: result.insertId, category_name: name, code_prefix: "OTH" };
     res.status(201).json({ category: newCategory });
   } catch (e) { next(e); }
 });
@@ -62,11 +64,13 @@ router.post("/custom-type", async (req, res, next) => {
     );
     if (existing.length > 0) return res.json({ type: existing[0], already_exists: true });
 
+    // Jenis dokumen custom ("Lainnya") selalu pakai kode OTH untuk penomoran
+    // dokumen (poin 8 requirement), berapapun nama yang diketik user.
     const [result] = await pool.query(
-      "INSERT INTO document_types (category_id, type_name, code_prefix) VALUES (?, ?, 'LNR')",
+      "INSERT INTO document_types (category_id, type_name, code_prefix) VALUES (?, ?, 'OTH')",
       [catId, name]
     );
-    const newType = { type_id: result.insertId, category_id: catId, type_name: name, code_prefix: "LNR" };
+    const newType = { type_id: result.insertId, category_id: catId, type_name: name, code_prefix: "OTH" };
     res.status(201).json({ type: newType });
   } catch (e) { next(e); }
 });

@@ -11,54 +11,52 @@ router.use(authRequired);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function generateDocumentNumber(conn, typeId) {
-  const [[t]] = await conn.query("SELECT code_prefix FROM document_types WHERE type_id = ?", [typeId]);
+// Format nomor dokumen: [KODE_KATEGORI]-[KODE_JENIS]-[TAHUN]-[RUNNING_NUMBER]
+// Contoh: DS-IJZ-2026-000001
+// Running number auto-increment per KOMBINASI kategori + jenis (bukan per
+// jenis saja), dan reset ke 1 setiap tahun berganti.
+async function generateDocumentNumber(conn, categoryId, typeId) {
+  const [[cat]] = await conn.query(
+    "SELECT code_prefix FROM categories WHERE category_id = ?",
+    [categoryId]
+  );
+  if (!cat) throw new Error("Kategori dokumen tidak ditemukan");
+
+  const [[t]] = await conn.query(
+    "SELECT code_prefix FROM document_types WHERE type_id = ?",
+    [typeId]
+  );
   if (!t) throw new Error("Tipe dokumen tidak ditemukan");
+
+  const categoryCode = cat.code_prefix || "OTH";
+  const typeCode      = t.code_prefix   || "OTH";
+
   const year = new Date().getFullYear();
+  // Kunci counter = kombinasi kategori + jenis, supaya "DS-IJZ" dan "DS-RPT"
+  // (atau "DG-GRU") masing-masing punya running number sendiri mulai dari 1.
+  const comboPrefix = `${categoryCode}-${typeCode}`;
+
   const [[counter]] = await conn.query(
     "SELECT last_seq FROM document_counters WHERE prefix = ? AND year = ? FOR UPDATE",
-    [t.code_prefix, year]
+    [comboPrefix, year]
   );
+
   let next;
   if (counter) {
     next = counter.last_seq + 1;
     await conn.query(
       "UPDATE document_counters SET last_seq = ? WHERE prefix = ? AND year = ?",
-      [next, t.code_prefix, year]
+      [next, comboPrefix, year]
     );
   } else {
     next = 1;
     await conn.query(
       "INSERT INTO document_counters (prefix, year, last_seq) VALUES (?, ?, 1)",
-      [t.code_prefix, year]
+      [comboPrefix, year]
     );
   }
-  const [[category]] =
-    await conn.query(
-      `
-      SELECT c.category_name
-      FROM document_types dt
-      JOIN categories c
-        ON c.category_id =
-          dt.category_id
-      WHERE dt.type_id = ?
-      `,
-      [typeId]
-    );
 
-  const categoryPrefix = {
-    "Data Siswa": "DS",
-    "Data Guru": "DG",
-    "Inventaris": "INV",
-    "Surat Menyurat": "SMT",
-  };
-
-  const cat =
-    categoryPrefix[
-      category?.category_name
-    ] || "DOC";
-
-  return `${cat}-${t.code_prefix}/${year}/${String(next).padStart(3,"0")}`;
+  return `${categoryCode}-${typeCode}-${year}-${String(next).padStart(6, "0")}`;
 }
 
 async function addAudit(
@@ -152,6 +150,45 @@ router.get("/", async (req, res, next) => {
       params
     );
     res.json({ documents: rows });
+  } catch (e) { next(e); }
+});
+
+// ── GET /api/documents/next-number — preview nomor dokumen berikutnya ─────────
+// Dipakai frontend untuk menampilkan field "Nomor Dokumen" (readonly) di form
+// upload SEBELUM dokumen benar-benar disimpan. Ini hanya intip nilai
+// last_seq+1 tanpa mengunci/menambah counter, jadi nomor final yang benar-benar
+// tersimpan (dari generateDocumentNumber saat submit) tetap dijamin unik &
+// berurutan walau ada beberapa user yang preview di waktu bersamaan.
+router.get("/meta/next-number", async (req, res, next) => {
+  try {
+    const { category_id, type_id } = req.query;
+    if (!category_id) return res.status(400).json({ error: "category_id wajib diisi" });
+    if (!type_id)      return res.status(400).json({ error: "type_id wajib diisi" });
+
+    const [[cat]] = await pool.query(
+      "SELECT code_prefix FROM categories WHERE category_id = ?",
+      [category_id]
+    );
+    const [[t]] = await pool.query(
+      "SELECT code_prefix FROM document_types WHERE type_id = ?",
+      [type_id]
+    );
+    if (!cat) return res.status(404).json({ error: "Kategori tidak ditemukan" });
+    if (!t)   return res.status(404).json({ error: "Jenis dokumen tidak ditemukan" });
+
+    const categoryCode = cat.code_prefix || "OTH";
+    const typeCode      = t.code_prefix   || "OTH";
+    const year = new Date().getFullYear();
+    const comboPrefix = `${categoryCode}-${typeCode}`;
+
+    const [[counter]] = await pool.query(
+      "SELECT last_seq FROM document_counters WHERE prefix = ? AND year = ?",
+      [comboPrefix, year]
+    );
+    const next = (counter?.last_seq || 0) + 1;
+    const nomor_dokumen = `${categoryCode}-${typeCode}-${year}-${String(next).padStart(6, "0")}`;
+
+    res.json({ nomor_dokumen, preview: true });
   } catch (e) { next(e); }
 });
 
@@ -321,7 +358,7 @@ router.post(
       await conn.beginTransaction();
 
       // 1. Generate nomor dokumen (dengan lock counter)
-      const nomor = await generateDocumentNumber(conn, type_id);
+      const nomor = await generateDocumentNumber(conn, category_id, type_id);
 
       // Generate ID manual untuk TiDB
       const [[maxRow]] = await conn.query(

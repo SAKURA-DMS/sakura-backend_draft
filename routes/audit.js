@@ -25,7 +25,8 @@ router.get("/", requirePermission("audit.view"), async (req, res, next) => {
         u.nama,
         u.role,
         u.avatar,
-        d.judul AS document_judul
+        d.judul AS document_judul,
+        d.nomor_dokumen AS document_nomor
       FROM audit_trail a
       LEFT JOIN users u
         ON u.id = a.user_id
