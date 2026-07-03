@@ -102,8 +102,9 @@ function friendlyError(err) {
   const msg = err.message || "";
   if (msg.includes("GEMINI_API_KEY"))  return "Layanan AI belum dikonfigurasi. Hubungi administrator.";
   if (msg.includes("GEMINI_403"))      return "API Key tidak memiliki izin akses Gemini.";
-  if (msg.includes("GEMINI_429"))      return "AI sedang sibuk (antrian penuh). Tunggu beberapa detik lalu coba lagi.";
-  if (msg.includes("Timeout"))         return "AI butuh waktu terlalu lama. Silakan coba lagi.";
+  if (msg.includes("GEMINI_429"))      return "Mohon maaf, SAKURA AI sedang memproses banyak permintaan. Silakan coba kembali beberapa saat lagi.";
+  if (msg.includes("GEMINI_TIMEOUT"))  return "Mohon maaf, SAKURA AI membutuhkan waktu lebih lama dari biasanya. Silakan coba kembali beberapa saat lagi.";
+  if (msg.includes("Timeout"))         return "Mohon maaf, SAKURA AI membutuhkan waktu lebih lama dari biasanya. Silakan coba kembali beberapa saat lagi.";
   return "Terjadi kesalahan saat menghubungi AI. Silakan coba lagi.";
 }
 
@@ -126,7 +127,11 @@ async function handleChat(req, res) {
     setCache(cacheKey, answer);
     res.json({ answer });
   } catch (e) {
-    console.error("[Chatbot] error:", e.message);
+    console.error("[Chatbot] error:", {
+      message: e.message,
+      userId: req.user?.id,
+      role: req.user?.role,
+    });
     res.status(502).json({ error: friendlyError(e) });
   }
 }

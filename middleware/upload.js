@@ -15,9 +15,31 @@ const ALLOWED_MIME = new Set([
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
   "application/vnd.ms-excel",          // .xls
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",       // .xlsx
+  "application/vnd.ms-powerpoint",     // .ppt
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
+  "text/csv",
+  "application/csv",
+  "text/xml",
+  "application/xml",
+  "application/json",
 ]);
 
-const ALLOWED_EXT = new Set([".pdf", ".jpg", ".jpeg", ".png", ".webp", ".doc", ".docx", ".xls", ".xlsx"]);
+const ALLOWED_EXT = new Set([
+  ".pdf",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  ".ppt",
+  ".pptx",
+  ".csv",
+  ".xml",
+  ".json",
+]);
 
 const fileFilter = (_req, file, cb) => {
   const ext = file.originalname.slice(file.originalname.lastIndexOf(".")).toLowerCase();

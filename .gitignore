@@ -3,3 +3,6 @@ node_modules
 *.log
 uploads/
 .DS_Store
+
+#Firebase Credentials
+config/sakura-dms-firebase-adminsdk-fbsvc-ef00080b2c.json

@@ -17,7 +17,7 @@ const approvalRoutes     = require("./routes/approvals");
 const dashboardRoutes    = require("./routes/dashboard");
 const presenceRoutes     = require("./routes/presence");
 const chatbotRoutes      = require("./routes/chatbotRoutes"); // ← BARU
-const { checkConnection } = require("./config/azureBlob");
+const { checkConnection } = require("./services/firebaseStorage");
 const { verifySmtp }      = require("./services/emailService");
 
 const app = express();
@@ -34,7 +34,7 @@ app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, max: 50, standardHeaders: true }));
 
-let azureStatus = { ok: null, message: "Belum dicek" };
+let storageStatus = { ok: null, message: "Belum dicek" };
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) =>
@@ -42,7 +42,7 @@ app.get("/api/health", (_req, res) =>
     status:  "ok",
     service: "sakura-dms-backend",
     time:    new Date().toISOString(),
-    azure:   azureStatus,
+    azure:   storageStatus,
   })
 );
 
@@ -110,16 +110,16 @@ app.listen(PORT, async () => {
   // SMTP health check (non-fatal)
   await verifySmtp();
 
-  // Azure health check (non-fatal)
+  // Firebase Storage health check (non-fatal)
   try {
-    azureStatus = await checkConnection();
-    if (azureStatus.ok) {
-      console.log(`Azure Blob OK — container: ${azureStatus.container} — ${azureStatus.message}`);
+    storageStatus = await checkConnection();
+    if (storageStatus.ok) {
+      console.log(`Firebase Storage OK — bucket: ${storageStatus.bucket} — ${storageStatus.message}`);
     } else {
-      console.warn(`Azure Blob WARNING: ${azureStatus.message}`);
+      console.warn(`Firebase Storage WARNING: ${storageStatus.message}`);
     }
   } catch (e) {
-    azureStatus = { ok: false, message: e.message };
-    console.warn("Azure Blob check failed:", e.message);
+    storageStatus = { ok: false, message: e.message };
+    console.warn("Firebase Storage check failed:", e.message);
   }
 });

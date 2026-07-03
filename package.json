@@ -1,7 +1,7 @@
 {
   "name": "sakura-dms-backend",
   "version": "1.0.0",
-  "description": "Backend API untuk Sakura DMS (Document Management System) — Node.js + Express + Multer + MySQL + JWT + Azure Blob Storage",
+  "description": "Backend API untuk Sakura DMS (Document Management System) — Node.js + Express + Multer + MySQL + JWT + Firebase Storage",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@azure/storage-blob": "^12.24.0",
+    "@google/genai": "^2.10.0",
     "axios": "^1.16.1",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^3.0.3",
@@ -20,6 +20,7 @@
     "dotenv": "^16.6.1",
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.0",
+    "firebase-admin": "^14.1.0",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.0",

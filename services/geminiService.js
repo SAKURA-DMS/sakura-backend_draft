@@ -1,158 +1,140 @@
-const https = require("https");
+const { GoogleGenAI } = require("@google/genai");
+
+const DEFAULT_MODEL = "gemini-2.5-flash";
+const DEFAULT_TIMEOUT_MS = 25000;
+const MAX_RETRIES = 2;
+
+let client = null;
+let clientApiKey = null;
 
 function getApiKey() {
   return process.env.GEMINI_API_KEY;
 }
 
-/**
- * Model tersedia di API key ini (hasil checkGeminiModels.js).
- * Urutan: terbaik → fallback ringan.
- */
-const GEMINI_MODELS = [
-  "gemini-2.5-flash",      // prioritas utama: cepat, kapabel, tersedia
-  "gemini-2.0-flash",      // fallback 1
-  "gemini-2.0-flash-lite", // fallback 2: paling ringan
-];
-
-function buildUrl(model, apiKey) {
-  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+function getModel() {
+  return process.env.GEMINI_MODEL || DEFAULT_MODEL;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ── Request Queue: max 1 request aktif, jeda 2 detik antar call ──────────────
-let _queueRunning = false;
-const _queue = [];
-
-function enqueue(fn) {
-  return new Promise((resolve, reject) => {
-    _queue.push({ fn, resolve, reject });
-    processQueue();
-  });
+function getTimeoutMs() {
+  const value = Number(process.env.GEMINI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_TIMEOUT_MS;
 }
 
-async function processQueue() {
-  if (_queueRunning || _queue.length === 0) return;
-  _queueRunning = true;
-  const { fn, resolve, reject } = _queue.shift();
+function getClient(apiKey) {
+  if (!client || clientApiKey !== apiKey) {
+    client = new GoogleGenAI({ apiKey });
+    clientApiKey = apiKey;
+  }
+  return client;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function normalizeGeminiError(err, model, attempt) {
+  const status = err?.status || err?.code || err?.response?.status || 0;
+  const message = err?.message || "Unknown Gemini error";
+  const normalized = new Error(`[${status || "ERR"}] model=${model} attempt=${attempt}: ${message}`);
+  normalized.status = Number(status) || 0;
+  normalized.cause = err;
+  return normalized;
+}
+
+function isRetryable(status) {
+  return status === 0 || status === 408 || status === 429 || status >= 500;
+}
+
+function extractText(response) {
+  if (typeof response?.text === "string") return response.text.trim();
+
+  const parts = response?.candidates?.[0]?.content?.parts || [];
+  return parts
+    .map((part) => part.text)
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+async function callGemini({ systemPrompt, userMessage, apiKey, model, timeoutMs, attempt }) {
+  const ai = getClient(apiKey);
+  const controller = new AbortController();
+  let timeout = null;
+
   try {
-    resolve(await fn());
-  } catch (e) {
-    reject(e);
+    const request = ai.models.generateContent({
+      model,
+      contents: [{ role: "user", parts: [{ text: userMessage }] }],
+      config: {
+        systemInstruction: systemPrompt,
+        temperature: 0.3,
+        maxOutputTokens: 512,
+      },
+      signal: controller.signal,
+    });
+
+    const timeoutPromise = new Promise((_, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort();
+        const timeoutErr = new Error(`Timeout setelah ${timeoutMs}ms`);
+        timeoutErr.status = 408;
+        reject(timeoutErr);
+      }, timeoutMs).unref?.();
+    });
+
+    const response = await Promise.race([request, timeoutPromise]);
+
+    const text = extractText(response);
+    if (!text) {
+      const reason = response?.candidates?.[0]?.finishReason || "EMPTY_RESPONSE";
+      const err = new Error(`Respons kosong dari Gemini: ${reason}`);
+      err.status = 503;
+      throw err;
+    }
+
+    return text;
+  } catch (err) {
+    if (err?.name === "AbortError" || err?.status === 408) {
+      const timeoutErr = new Error(`Timeout setelah ${timeoutMs}ms`);
+      timeoutErr.status = 408;
+      throw normalizeGeminiError(timeoutErr, model, attempt);
+    }
+    throw normalizeGeminiError(err, model, attempt);
   } finally {
-    await sleep(2000); // jeda 2 detik antar request
-    _queueRunning = false;
-    processQueue();
+    if (timeout) clearTimeout(timeout);
   }
 }
 
-/**
- * Kirim prompt ke Gemini.
- * - Request queue (1 request aktif, jeda 2s)
- * - Retry 2x saat 429 (jeda 5s, 10s)
- * - Fallback ke model berikutnya saat 403/404/5xx
- */
 async function askGemini(systemPrompt, userMessage) {
   const apiKey = getApiKey();
   if (!apiKey || apiKey === "your-gemini-api-key-here" || !apiKey.trim()) {
     throw new Error("GEMINI_API_KEY belum dikonfigurasi di file .env backend.");
   }
 
-  const payload = JSON.stringify({
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    contents: [{ role: "user", parts: [{ text: userMessage }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 512 },
-  });
-
-  return enqueue(() => _askWithFallback(payload, apiKey));
-}
-
-async function _askWithFallback(payload, apiKey) {
-  const MAX_RETRIES = 2;
+  const model = getModel();
+  const timeoutMs = getTimeoutMs();
   let lastError = null;
 
-  for (const model of GEMINI_MODELS) {
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        return await callGemini(buildUrl(model, apiKey), payload, model);
-      } catch (err) {
-        lastError = err;
-        const code = extractStatusCode(err.message);
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    try {
+      return await callGemini({ systemPrompt, userMessage, apiKey, model, timeoutMs, attempt });
+    } catch (err) {
+      lastError = err;
+      const status = err.status || 0;
+      console.error("[GeminiService] request failed", {
+        model,
+        attempt,
+        status,
+        message: err.message,
+      });
 
-        if (code === 429) {
-          if (attempt < MAX_RETRIES) {
-            const wait = 5000 * attempt;
-            console.warn(`[GeminiService] 429 model="${model}" attempt=${attempt}, retry in ${wait}ms...`);
-            await sleep(wait);
-            continue;
-          }
-          console.warn(`[GeminiService] Model "${model}" tetap 429, ganti model.`);
-          break;
-        }
-
-        if (code === 403 || code === 404 || code >= 500) {
-          console.warn(`[GeminiService] Model "${model}" [${code}], ganti model.`);
-          break;
-        }
-
-        throw err;
-      }
+      if (attempt > MAX_RETRIES || !isRetryable(status)) break;
+      await sleep(1000 * attempt);
     }
   }
 
-  const code = extractStatusCode(lastError?.message || "");
-  if (code === 429) throw new Error("GEMINI_429");
-  if (code === 403) throw new Error("GEMINI_403");
-  throw lastError || new Error("Semua model Gemini gagal.");
-}
-
-function extractStatusCode(msg) {
-  const m = msg.match(/\[(\d{3})\]/);
-  return m ? parseInt(m[1]) : 0;
-}
-
-function callGemini(url, payload, model) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      url,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(payload),
-        },
-      },
-      (res) => {
-        let raw = "";
-        res.on("data", (c) => (raw += c));
-        res.on("end", () => {
-          try {
-            const data = JSON.parse(raw);
-            if (res.statusCode >= 400) {
-              const msg = data?.error?.message || `HTTP ${res.statusCode}`;
-              return reject(new Error(`[${res.statusCode}] model=${model}: ${msg}`));
-            }
-            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-            if (!text) {
-              const reason = data?.candidates?.[0]?.finishReason;
-              return reject(new Error(
-                reason && reason !== "STOP"
-                  ? `[400] finishReason: ${reason}`
-                  : `[503] Respons kosong model=${model}`
-              ));
-            }
-            resolve(text.trim());
-          } catch (e) {
-            reject(new Error(`[500] Parse error: ${e.message}`));
-          }
-        });
-      }
-    );
-    req.setTimeout(25000, () => { req.destroy(); reject(new Error(`[503] Timeout model=${model}`)); });
-    req.on("error", (e) => reject(new Error(`[503] Network: ${e.message}`)));
-    req.write(payload);
-    req.end();
-  });
+  if (lastError?.status === 429) throw new Error("GEMINI_429");
+  if (lastError?.status === 403) throw new Error("GEMINI_403");
+  if (lastError?.status === 408) throw new Error("GEMINI_TIMEOUT");
+  throw lastError || new Error("Gemini gagal memproses permintaan.");
 }
 
 module.exports = { askGemini };

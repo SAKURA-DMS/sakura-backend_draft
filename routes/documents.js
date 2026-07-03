@@ -3,7 +3,12 @@ const pool    = require("../config/db");
 const { authRequired }      = require("../middleware/auth");
 const { requirePermission } = require("../middleware/rbac");
 const upload                = require("../middleware/upload");
-const { uploadBufferToBlob, generateSasUrl, downloadBlobBuffer, deleteBlob } = require("../config/azureBlob");
+const {
+  uploadFile,
+  deleteFile,
+  getFileUrl,
+  downloadFileBuffer,
+} = require("../services/firebaseStorage");
 const { generateAuditHash } = require("../utils/auditHash");
 
 const router = express.Router();
@@ -253,7 +258,7 @@ router.get("/:id/download", async (req, res, next) => {
     if (!doc.file_blob_name) return res.status(422).json({ error: "Blob name tidak ditemukan untuk dokumen ini" });
 
     const expiryMinutes = Number(req.query.expiry) || 60;
-    const sasUrl = await generateSasUrl(doc.file_blob_name, expiryMinutes);
+    const sasUrl = await getFileUrl(doc.file_blob_name);
 
     // Audit: catat akses download
     await addAudit(pool, doc.id, req.user.id, `Mengunduh dokumen (SAS ${expiryMinutes} menit)`);
@@ -278,7 +283,7 @@ router.get("/:id/preview", async (req, res, next) => {
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
     if (!doc.file_blob_name) return res.status(422).json({ error: "Blob name tidak ditemukan untuk dokumen ini" });
 
-    const sasUrl = await generateSasUrl(doc.file_blob_name, 15);
+    const sasUrl = await getFileUrl(doc.file_blob_name);
 
     res.json({
       url:      sasUrl,
@@ -288,7 +293,7 @@ router.get("/:id/preview", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/download-stream — proxy stream file asli dari Azure ─
+// ── GET /api/documents/:id/download-stream — proxy stream file asli dari storage ─
 router.get("/:id/download-stream", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -299,8 +304,8 @@ router.get("/:id/download-stream", async (req, res, next) => {
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
     if (!doc.file_blob_name) return res.status(422).json({ error: "Blob name tidak ditemukan" });
 
-    // Download buffer dari Azure
-    const buffer = await downloadBlobBuffer(doc.file_blob_name);
+    // Download buffer dari storage
+    const buffer = await downloadFileBuffer(doc.file_blob_name);
 
     // Audit
     await addAudit(pool, doc.id, req.user.id, "Mengunduh dokumen original (stream)");
@@ -322,7 +327,7 @@ router.post(
   requirePermission("documents.upload"),
   upload.single("file"),
   async (req, res, next) => {
-    // ── Validasi awal (sebelum menyentuh Azure) ──────────────────────────────
+    // ── Validasi awal (sebelum menyentuh storage) ─────────────────────────────
     if (!req.file) {
       return res.status(400).json({ error: "File wajib diupload (field name: file)" });
     }
@@ -340,15 +345,18 @@ router.post(
       return res.status(400).json({ error: "Field metadata bukan JSON valid" });
     }
 
-    // ── Upload ke Azure Blob DULU (sebelum transaksi DB) ─────────────────────
+    // ── Upload ke Firebase Storage DULU (sebelum transaksi DB) ────────────────
     let blob;
     try {
-      blob = await uploadBufferToBlob(req.file, "documents");
-    } catch (azureErr) {
-      console.error("[Upload] Azure upload gagal:", azureErr.message);
+      blob = await uploadFile(req.file, category_id);
+    } catch (storageErr) {
+      if (storageErr.status) {
+        return res.status(storageErr.status).json({ error: storageErr.message });
+      }
+      console.error("[Upload] Firebase upload gagal:", storageErr.message);
       return res.status(502).json({
-        error: "Gagal mengunggah file ke Azure Storage. Coba lagi beberapa saat.",
-        detail: process.env.NODE_ENV !== "production" ? azureErr.message : undefined,
+        error: "Gagal mengunggah file ke Firebase Storage. Coba lagi beberapa saat.",
+        detail: process.env.NODE_ENV !== "production" ? storageErr.message : undefined,
       });
     }
 
@@ -454,11 +462,11 @@ router.post(
       });
     } catch (dbErr) {
       await conn.rollback();
-      // Rollback blob yang sudah terupload agar tidak ada orphan
-      console.error("[Upload] DB error setelah Azure upload — rolling back blob:", blob?.blobName);
+      // Rollback file yang sudah terupload agar tidak ada orphan
+      console.error("[Upload] DB error setelah Firebase upload — rolling back file:", blob?.blobName);
       if (blob?.blobName) {
-        await deleteBlob(blob.blobName).catch((e) =>
-          console.warn("[Upload] Gagal hapus orphan blob:", e.message)
+        await deleteFile(blob.blobName).catch((e) =>
+          console.warn("[Upload] Gagal hapus orphan file:", e.message)
         );
       }
       next(dbErr);
@@ -476,20 +484,23 @@ router.patch(
   async (req, res, next) => {
     if (!req.file) return res.status(400).json({ error: "File baru wajib diupload (field name: file)" });
 
-    // Ambil blob lama
+    // Ambil file lama
     const [[doc]] = await pool.query(
-      "SELECT id, judul, file_blob_name, versi, deleted_at FROM documents WHERE id = ?",
+      "SELECT id, judul, category_id, file_blob_name, versi, deleted_at FROM documents WHERE id = ?",
       [req.params.id]
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
 
-    // Upload file baru ke Azure
+    // Upload file baru ke Firebase Storage
     let newBlob;
     try {
-      newBlob = await uploadBufferToBlob(req.file, "documents");
-    } catch (azureErr) {
-      return res.status(502).json({ error: "Gagal mengunggah file ke Azure Storage.", detail: azureErr.message });
+      newBlob = await uploadFile(req.file, doc.category_id);
+    } catch (storageErr) {
+      if (storageErr.status) {
+        return res.status(storageErr.status).json({ error: storageErr.message });
+      }
+      return res.status(502).json({ error: "Gagal mengunggah file ke Firebase Storage.", detail: storageErr.message });
     }
 
     const conn = await pool.getConnection();
@@ -530,14 +541,14 @@ router.patch(
 
       await conn.commit();
 
-      // Hapus blob lama SETELAH commit DB berhasil
-      if (oldBlobName) await deleteBlob(oldBlobName);
+      // Hapus file lama SETELAH commit DB berhasil
+      if (oldBlobName) await deleteFile(oldBlobName);
 
       res.json({ message: "File berhasil diganti", versi: newVersi, file_url: newBlob.url });
     } catch (dbErr) {
       await conn.rollback();
-      // Rollback new blob
-      if (newBlob?.blobName) await deleteBlob(newBlob.blobName).catch(() => {});
+      // Rollback file baru
+      if (newBlob?.blobName) await deleteFile(newBlob.blobName).catch(() => {});
       next(dbErr);
     } finally {
       conn.release();
@@ -754,12 +765,12 @@ router.post("/:id/restore", requirePermission("documents.delete"), async (req, r
   } catch (e) { next(e); }
 });
 
-// ── DELETE /api/documents/:id/permanent — hapus permanen + blob ───────────────
+// ── DELETE /api/documents/:id/permanent — hapus permanen + file ───────────────
 router.delete("/:id/permanent", requirePermission("documents.delete"), async (req, res, next) => {
   try {
     const [[doc]] = await pool.query("SELECT file_blob_name FROM documents WHERE id = ?", [req.params.id]);
     if (!doc) return res.status(404).json({ error: "Dokumen tidak ditemukan" });
-    if (doc.file_blob_name) await deleteBlob(doc.file_blob_name);
+    if (doc.file_blob_name) await deleteFile(doc.file_blob_name);
     await pool.query("DELETE FROM documents WHERE id = ?", [req.params.id]);
     res.json({ message: "Dokumen dihapus permanen" });
   } catch (e) { next(e); }
