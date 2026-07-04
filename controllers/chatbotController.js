@@ -1,9 +1,10 @@
 const pool          = require("../config/db");
 const { askGemini } = require("../services/geminiService");
 
-// ── Cache sederhana TTL 3 menit ───────────────────────────────────────────────
+// FIX: naikkan cache TTL dari 3 menit → 10 menit.
+// Pertanyaan yang sama dalam 10 menit langsung balik dari cache, 0 panggilan Gemini.
 const cache     = new Map();
-const CACHE_TTL = 3 * 60 * 1000;
+const CACHE_TTL = 10 * 60 * 1000;
 
 function getCached(key) {
   const e = cache.get(key);
@@ -16,30 +17,51 @@ function setCache(key, value) {
   cache.set(key, { value, ts: Date.now() });
 }
 
+// ── Rate limiter per user: min 3 detik antar request ─────────────────────────
+// FIX: tambah rate limit di level controller agar user tidak spam tombol kirim.
+const userLastRequest = new Map();
+const USER_RATE_MS    = 3000;
+
+function isUserRateLimited(userId) {
+  const last = userLastRequest.get(userId);
+  return last && (Date.now() - last) < USER_RATE_MS;
+}
+function markUserRequest(userId) {
+  userLastRequest.set(userId, Date.now());
+  if (userLastRequest.size > 500) {
+    const cutoff = Date.now() - 60000;
+    for (const [k, v] of userLastRequest) { if (v < cutoff) userLastRequest.delete(k); }
+  }
+}
+
 // ── System prompt (singkat untuk hemat token) ─────────────────────────────────
 const BASE_SYSTEM_PROMPT = `Kamu adalah SAKURA AI, asisten manajemen dokumen sekolah.
 Jawab HANYA berdasarkan DATA SISTEM di bawah. Jangan mengarang data.
-Bahasa Indonesia, singkat, ramah, positif, dan solutif. Gunakan poin jika lebih dari 1 item.
-Jika data yang diminta tidak tersedia di DATA SISTEM, JANGAN pernah bilang "tidak memiliki
-informasi spesifik" atau "berdasarkan data sistem saat ini" secara negatif. Sebagai gantinya,
-jelaskan langkah atau fitur terkait yang bisa dilakukan pengguna, dan arahkan mereka ke halaman
-yang relevan (sertakan path di dalam kurung, contoh: "Silakan buka halaman Upload Dokumen (/upload)").
-Jangan pernah menyoroti keterbatasan data secara negatif.`;
+Bahasa Indonesia, singkat, ramah, solutif. Gunakan poin jika lebih dari 1 item.
+Jika data tidak tersedia, jelaskan fitur terkait dan arahkan ke halaman relevan
+(sertakan path dalam tanda kurung, contoh: "buka halaman Upload (/upload)").`;
 
-// NOTE: When instructing the user to go to an internal page, include the relative
-// path in the response in parentheses, e.g. "Silakan buka halaman Upload Dokumen (/upload)".
-// Frontend will detect such paths and render a quick navigation button.
+// ── Helper: strip markdown code fence yang kadang ditambahkan Gemini ──────────
+// FIX UTAMA: Gemini sering membungkus respons JSON dengan ```json ... ```
+// Sebelumnya tidak di-strip → JSON.parse gagal → raw JSON tampil di chat.
+function stripFences(raw) {
+  if (!raw || typeof raw !== "string") return raw;
+  return raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/, "")
+    .trim();
+}
 
-// ── Ambil konteks dari DB ──────────────────────────────────────────────────────
+// ── Ambil konteks dari DB ─────────────────────────────────────────────────────
 async function buildContext(question, user) {
-  const ctx = [];
-  const results = [];
-  const lower = question.toLowerCase();
-  const ownerClause = user.role === "Guru" ? "AND d.uploaded_by = ?" : "";
-  const ownerParam = user.role === "Guru" ? [user.id] : [];
+  const ctx      = [];
+  const results  = [];
+  const lower    = question.toLowerCase();
+  const isGuru   = user.role === "Guru";
+  const ownerSQL = isGuru ? "AND d.uploaded_by = ?" : "";
+  const ownerPrm = isGuru ? [user.id] : [];
 
   try {
-    // Statistik (selalu ambil sebagai base context)
     const [stats] = await pool.query(
       `SELECT COUNT(*) AS total,
               SUM(d.status='Menunggu')   AS menunggu,
@@ -48,52 +70,50 @@ async function buildContext(question, user) {
               SUM(d.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY))  AS minggu_ini,
               SUM(d.created_at >= DATE_FORMAT(NOW(),'%Y-%m-01'))     AS bulan_ini,
               SUM(DATE(d.created_at) = CURDATE())                    AS hari_ini
-       FROM documents d WHERE d.deleted_at IS NULL ${ownerClause}`,
-      ownerParam
+       FROM documents d WHERE d.deleted_at IS NULL ${ownerSQL}`,
+      ownerPrm
     );
     ctx.push(
-      `Statistik dokumen: total=${stats[0].total}, menunggu=${stats[0].menunggu}, ` +
+      `Statistik: total=${stats[0].total}, menunggu=${stats[0].menunggu}, ` +
       `diarsipkan=${stats[0].diarsipkan}, ditolak=${stats[0].ditolak}, ` +
       `hari_ini=${stats[0].hari_ini}, minggu_ini=${stats[0].minggu_ini}, bulan_ini=${stats[0].bulan_ini}`
     );
 
-    // Detail menunggu (jika ditanya)
     if (/(menunggu|persetujuan|pending|belum)/.test(lower)) {
       const [rows] = await pool.query(
         `SELECT d.id, d.judul, d.nomor_dokumen, u.nama, DATE(d.created_at) AS tgl
          FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
-         WHERE d.status='Menunggu' AND d.deleted_at IS NULL ${ownerClause}
+         WHERE d.status='Menunggu' AND d.deleted_at IS NULL ${ownerSQL}
          ORDER BY d.created_at DESC LIMIT 5`,
-        ownerParam
+        ownerPrm
       );
       ctx.push(rows.length
-        ? "Dokumen menunggu:\n" + rows.map((r) => `- ${r.judul} (${r.nomor_dokumen}) oleh ${r.nama} [${r.tgl}]`).join("\n")
+        ? "Dokumen menunggu:\n" + rows.map(r => `- ${r.judul} (${r.nomor_dokumen}) oleh ${r.nama} [${r.tgl}]`).join("\n")
         : "Tidak ada dokumen menunggu.");
-      // add structured results
-      for (const r of rows) results.push({ type: "document", id: r.id, judul: r.judul, nomor: r.nomor_dokumen, status: "Menunggu" });
+      for (const r of rows)
+        results.push({ type: "document", id: r.id, judul: r.judul, nomor: r.nomor_dokumen, status: "Menunggu" });
     }
 
-    // Pencarian keyword
     if (/(cari|temukan|SK|surat|kurikulum)/.test(lower)) {
-      const kw = question.replace(/[^\w\s]/g, "").split(/\s+/).filter((w) => w.length > 3);
+      const kw = question.replace(/[^\w\s]/g, "").split(/\s+/).filter(w => w.length > 3);
       if (kw.length) {
         const likes  = kw.map(() => "(d.judul LIKE ? OR d.nomor_dokumen LIKE ?)").join(" OR ");
-        const params = kw.flatMap((k) => [`%${k}%`, `%${k}%`]);
+        const params = kw.flatMap(k => [`%${k}%`, `%${k}%`]);
         const [rows] = await pool.query(
           `SELECT d.id, d.judul, d.nomor_dokumen, d.status, u.nama, DATE(d.created_at) AS tgl
            FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by
-           WHERE d.deleted_at IS NULL AND (${likes}) ${ownerClause}
+           WHERE d.deleted_at IS NULL AND (${likes}) ${ownerSQL}
            ORDER BY d.created_at DESC LIMIT 5`,
-          [...params, ...ownerParam]
+          [...params, ...ownerPrm]
         );
         ctx.push(rows.length
-          ? "Hasil cari:\n" + rows.map((r) => `- ${r.judul} | ${r.nomor_dokumen} | ${r.status} | ${r.nama} | ${r.tgl}`).join("\n")
+          ? "Hasil cari:\n" + rows.map(r => `- ${r.judul} | ${r.nomor_dokumen} | ${r.status} | ${r.nama} | ${r.tgl}`).join("\n")
           : "Tidak ditemukan dokumen yang cocok.");
-        for (const r of rows) results.push({ type: "document", id: r.id, judul: r.judul, nomor: r.nomor_dokumen, status: r.status });
+        for (const r of rows)
+          results.push({ type: "document", id: r.id, judul: r.judul, nomor: r.nomor_dokumen, status: r.status });
       }
     }
 
-    // Upload terbaru / siapa upload
     if (/(siapa|upload|mengupload|admin)/.test(lower)) {
       const [rows] = await pool.query(
         `SELECT d.id, u.nama, u.role, d.judul, DATE(d.created_at) AS tgl
@@ -101,11 +121,11 @@ async function buildContext(question, user) {
          WHERE d.deleted_at IS NULL ORDER BY d.created_at DESC LIMIT 5`
       );
       if (rows.length) {
-        ctx.push("Upload terbaru:\n" + rows.map((r) => `- ${r.nama}(${r.role}): "${r.judul}" [${r.tgl}]`).join("\n"));
-        for (const r of rows) results.push({ type: "document", id: r.id, judul: r.judul, nomor: r.nomor_dokumen || null, status: null });
+        ctx.push("Upload terbaru:\n" + rows.map(r => `- ${r.nama}(${r.role}): "${r.judul}" [${r.tgl}]`).join("\n"));
+        for (const r of rows)
+          results.push({ type: "document", id: r.id, judul: r.judul, nomor: null, status: null });
       }
     }
-
   } catch (e) {
     console.error("[Chatbot] buildContext error:", e.message);
   }
@@ -115,110 +135,97 @@ async function buildContext(question, user) {
 
 function friendlyError(err) {
   const msg = err.message || "";
-  if (msg.includes("GEMINI_API_KEY"))  return "Layanan AI belum dikonfigurasi. Hubungi administrator.";
-  if (msg.includes("GEMINI_403"))      return "API Key tidak memiliki izin akses Gemini.";
-  if (msg.includes("GEMINI_429"))      return "Mohon maaf, SAKURA AI sedang memproses banyak permintaan. Silakan coba kembali beberapa saat lagi.";
-  if (msg.includes("GEMINI_TIMEOUT"))  return "Mohon maaf, SAKURA AI membutuhkan waktu lebih lama dari biasanya. Silakan coba kembali beberapa saat lagi.";
-  if (msg.includes("Timeout"))         return "Mohon maaf, SAKURA AI membutuhkan waktu lebih lama dari biasanya. Silakan coba kembali beberapa saat lagi.";
+  if (msg.includes("GEMINI_API_KEY")) return "Layanan AI belum dikonfigurasi. Hubungi administrator.";
+  if (msg.includes("GEMINI_403"))     return "API Key tidak memiliki izin akses Gemini.";
+  if (msg.includes("GEMINI_429"))     return "Layanan AI sedang sibuk. Silakan coba lagi dalam beberapa detik.";
+  if (msg.includes("GEMINI_TIMEOUT") || msg.includes("Timeout")) return "AI membutuhkan waktu lebih lama. Silakan coba lagi.";
   return "Terjadi kesalahan saat menghubungi AI. Silakan coba lagi.";
 }
 
-// ── POST /api/chatbot ──────────────────────────────────────────────────────────
+// ── POST /api/chatbot ─────────────────────────────────────────────────────────
 async function handleChat(req, res) {
   try {
     const { message } = req.body;
     if (!message?.trim()) return res.status(400).json({ error: "Pesan tidak boleh kosong." });
 
+    // FIX: cek rate limit per user sebelum panggil Gemini
+    const userId = req.user?.id || req.ip;
+    if (isUserRateLimited(userId)) {
+      return res.status(429).json({ error: "Mohon tunggu sebentar sebelum mengirim pesan berikutnya." });
+    }
+
     const trimmed  = message.trim().slice(0, 300);
-    const cacheKey = `${req.user.role}:${trimmed.toLowerCase()}`;
+    const cacheKey = `${req.user?.role}:${trimmed.toLowerCase()}`;
 
     const cached = getCached(cacheKey);
-    if (cached) return res.json({ answer: cached.answer, links: cached.links || [], fromCache: true });
+    if (cached) {
+      markUserRequest(userId);
+      return res.json({ answer: cached.answer, links: cached.links || [], fromCache: true });
+    }
 
-    const context = await buildContext(trimmed, req.user);
+    markUserRequest(userId);
+
+    const context      = await buildContext(trimmed, req.user);
     const systemPrompt = `${BASE_SYSTEM_PROMPT}\n\nDATA SISTEM:\n${context.text}`;
 
-    // Ask the model to return a JSON object ONLY with fields: text (string) and links (array of {label,path}).
-    // Example: {"text":"Jawaban singkat...","links":[{"label":"Buka /upload","path":"/upload"}]}
-    const jsonInstruction = `\n\nPENTING: Keluarkan jawaban dalam FORMAT JSON SAJA (tanpa teks tambahan) dengan schema:\n` +
-      `{"text":"<jawaban singkat dalam bahasa Indonesia>", "links":[{"label":"<label>","path":"/<route>"}] }` +
-      `\nJika tidak ada link, gunakan "links": [] . Pastikan output adalah valid JSON.`;
+    // Instruksi JSON — singkat agar hemat token
+    const jsonInstruction =
+      `\n\nBALAS HANYA dengan JSON valid (tanpa teks lain, tanpa markdown fence):\n` +
+      `{"text":"<jawaban>","links":[{"label":"<label>","path":"/<route>"}]}\n` +
+      `Jika tidak ada link navigasi, gunakan "links":[].`;
 
     const raw = await askGemini(systemPrompt + jsonInstruction, trimmed);
 
-    let parsed = null;
-    let answerText = String(raw);
-    let links = [];
+    // FIX: strip markdown fence SEBELUM parse
+    const cleaned = stripFences(raw);
 
+    let parsed      = null;
+    let answerText  = cleaned;
+    let links       = [];
+
+    // Coba parse JSON
     try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      // If parsing fails, try to extract a JSON substring
-      const firstBrace = raw.indexOf('{');
-      const lastBrace = raw.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-        const maybe = raw.slice(firstBrace, lastBrace + 1);
-        try { parsed = JSON.parse(maybe); } catch (_) { parsed = null; }
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // Fallback: coba ekstrak substring JSON dari { sampai }
+      const fb = cleaned.indexOf("{");
+      const lb = cleaned.lastIndexOf("}");
+      if (fb !== -1 && lb > fb) {
+        try { parsed = JSON.parse(cleaned.slice(fb, lb + 1)); } catch { parsed = null; }
       }
     }
 
-    if (parsed && typeof parsed.text === 'string') {
+    if (parsed && typeof parsed.text === "string") {
       answerText = parsed.text;
       if (Array.isArray(parsed.links)) {
-        // sanitize paths
-        links = parsed.links.map(l => ({ label: String(l.label || `Buka ${l.path || ''}`).trim(), path: String(l.path || '').trim() })).filter(l => l.path);
+        links = parsed.links
+          .map(l => ({ label: String(l.label || `Buka ${l.path || ""}`).trim(), path: String(l.path || "").trim() }))
+          .filter(l => l.path);
       }
     } else {
-      // fallback: extract relative paths and keywords as before
-      const pathRegex = /\/(?:[a-z0-9\-_/]+)/gi;
-      const foundPaths = Array.from(new Set((String(answerText).match(pathRegex) || []).map(p => p.trim())));
-
-      const routeMap = [
-        { keys: ["upload dokumen", "halaman upload", "upload"], path: "/upload" },
-        { keys: ["dashboard", "statistik", "statistik dokumen"], path: "/dashboard" },
-        { keys: ["arsip", "archive", "arsip digital"], path: "/archive" },
-        { keys: ["persetujuan", "approval", "menunggu"], path: "/approval" },
-        { keys: ["persetujuan pending", "approval pending", "menunggu"], path: "/approval/pending" },
-        { keys: ["persetujuan disetujui", "approved", "approval approved"], path: "/approval/approved" },
-        { keys: ["profil", "profile"], path: "/profile" },
-        { keys: ["ganti password", "change password", "ubah kata sandi"], path: "/change-password" },
-        { keys: ["pengguna", "users", "manajemen pengguna"], path: "/users" },
-        { keys: ["peran", "roles", "manajemen peran"], path: "/roles" },
-        { keys: ["log", "logs", "riwayat"], path: "/logs" },
-        { keys: ["sampah", "trash"], path: "/trash" },
-        { keys: ["pengaturan", "settings"], path: "/settings" },
-        { keys: ["beranda", "home", "halaman beranda"], path: "/home" },
-      ];
-
-      const lower = String(answerText).toLowerCase();
-      const keywordPaths = [];
-      for (const m of routeMap) {
-        if (m.keys.some(k => lower.includes(k))) {
-          if (!foundPaths.includes(m.path)) keywordPaths.push(m.path);
-        }
-      }
-
-      links = Array.from(new Set([...foundPaths, ...keywordPaths])).map(p => ({ label: `Buka ${p}`, path: p }));
+      // Fallback terakhir: ambil teks mentah dari AI, cari path-path di dalamnya
+      // (tidak ada JSON valid → jawab apa adanya)
+      const pathRegex  = /\/(?:[a-z0-9\-_/]+)/gi;
+      const foundPaths = Array.from(new Set((answerText.match(pathRegex) || []).map(p => p.trim())));
+      links = foundPaths.map(p => ({ label: `Buka ${p}`, path: p }));
     }
 
-    // include any document results found in the DB as direct links
-    if (context.results && context.results.length) {
+    // Tambah link langsung ke dokumen dari DB
+    if (context.results?.length) {
       for (const r of context.results) {
         if (r.type === "document" && r.id) {
           const p = `/documents/${r.id}`;
-          if (!links.some((l) => l.path === p)) links.push({ label: `Buka dokumen: ${r.judul || r.nomor || r.id}`, path: p });
+          if (!links.some(l => l.path === p))
+            links.push({ label: `Buka dokumen: ${r.judul || r.id}`, path: p });
         }
       }
     }
 
     setCache(cacheKey, { answer: answerText, links });
     res.json({ answer: answerText, links });
+
   } catch (e) {
-    console.error("[Chatbot] error:", {
-      message: e.message,
-      userId: req.user?.id,
-      role: req.user?.role,
-    });
+    console.error("[Chatbot] error:", { message: e.message, userId: req.user?.id, role: req.user?.role });
     res.status(502).json({ error: friendlyError(e) });
   }
 }
