@@ -144,6 +144,14 @@ router.get("/", async (req, res, next) => {
     if (tahun_ajaran){ where.push("d.tahun_ajaran = ?");                  params.push(tahun_ajaran); }
     if (q)           { where.push("(d.judul LIKE ? OR d.nomor_dokumen LIKE ?)"); params.push(`%${q}%`, `%${q}%`); }
 
+    // Guru cuma boleh melihat dokumen miliknya sendiri. Ini di-enforce di
+    // level query (bukan cuma disembunyikan di UI) supaya tidak bisa
+    // dilewati dengan memanggil API secara langsung.
+    if (req.user.role === "Guru") {
+      where.push("d.uploaded_by = ?");
+      params.push(req.user.id);
+    }
+
     const [rows] = await pool.query(
       `SELECT d.*, u.nama AS uploader_nama, c.category_name, dt.type_name
        FROM documents d
@@ -210,6 +218,9 @@ router.get("/:id", async (req, res, next) => {
       [req.params.id]
     );
     if (!doc) return res.status(404).json({ error: "Dokumen tidak ditemukan" });
+    if (req.user.role === "Guru" && doc.uploaded_by !== req.user.id) {
+      return res.status(403).json({ error: "Akses ditolak" });
+    }
 
     const [trail] = await pool.query(
       `SELECT a.*, u.nama, u.role, u.avatar
