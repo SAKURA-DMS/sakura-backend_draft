@@ -132,12 +132,7 @@ function buildOtpEmailHtml(namaUser, otpCode, expiryMin = 5) {
 
     <!-- Footer -->
     <div style="padding:16px 34px; border-top:1px solid #ececf3; background:#fbfbfd; text-align:center; font-size:12px; color:#9a9aa5;">
-      © 2026 SAKURA · Email ini dibuat otomatis, jangan dibalas.
-    </div>
-  </div>
-</body>
-</html>
-      © ${new Date().getFullYear()} Sakura DMS &nbsp;·&nbsp; Email ini dibuat otomatis, jangan dibalas.
+      © ${new Date().getFullYear()} SAKURA · Email ini dibuat otomatis, jangan dibalas.
     </div>
   </div>
 </body>
