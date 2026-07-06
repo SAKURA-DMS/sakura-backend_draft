@@ -17,6 +17,7 @@ const approvalRoutes     = require("./routes/approvals");
 const dashboardRoutes    = require("./routes/dashboard");
 const presenceRoutes     = require("./routes/presence");
 const chatbotRoutes      = require("./routes/chatbotRoutes"); // ← BARU
+const ocrRoutes          = require("./routes/ocr"); // ← BARU: OCR via Gemini Vision
 const { checkConnection } = require("./services/firebaseStorage");
 const { verifySmtp }      = require("./services/emailService");
 
@@ -65,6 +66,7 @@ app.get("/", (_req, res) => {
       <li><code>POST /api/presence/heartbeat</code> (perlu JWT)</li>
       <li><code>GET  /api/presence/status</code> (perlu JWT)</li>
       <li><code>POST /api/chatbot</code> (perlu JWT)</li>
+      <li><code>POST /api/ocr/scan</code> (perlu JWT) — OCR dokumen via Gemini Vision</li>
     </ul>
   `);
 });
@@ -82,6 +84,7 @@ app.use("/api/dashboard",     dashboardRoutes);
 app.use("/api/chatbot",       chatbotRoutes);
 app.use("/api/presence",      presenceRoutes);
 app.use("/api/chatbot",       chatbotRoutes); // ← BARU
+app.use("/api/ocr",           ocrRoutes); // ← BARU: OCR via Gemini Vision
 
 // 404
 app.use((req, res) => res.status(404).json({ error: "Not Found", path: req.path }));
