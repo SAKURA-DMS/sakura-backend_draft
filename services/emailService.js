@@ -154,6 +154,11 @@ async function sendOtpEmail({ to, namaUser, otpCode, expiryMin = 5 }) {
   const subject = `[Sakura DMS] Kode OTP Verifikasi: ${otpCode}`;
   const html    = buildOtpEmailHtml(namaUser, otpCode, expiryMin);
 
+  console.log("SEND OTP TO:", to);
+  console.log("SMTP HOST:", process.env.SMTP_HOST);
+  console.log("SMTP USER:", process.env.SMTP_USER);
+  await transporter.verify();
+
   await transporter.sendMail({
     from:    process.env.SMTP_FROM || `"Sakura DMS" <${process.env.SMTP_USER}>`,
     to,

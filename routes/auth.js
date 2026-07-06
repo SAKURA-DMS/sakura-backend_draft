@@ -119,7 +119,11 @@ router.post("/login", async (req, res, next) => {
         await sendOtpEmail({ to: user.email, namaUser: user.nama, otpCode: otpPlain, expiryMin: OTP_EXPIRY_MINUTES });
       } catch (mailErr) {
         console.error("[2FA] Gagal kirim OTP email:", mailErr.message);
-        return res.status(503).json({ error: "Gagal mengirim OTP ke email. Coba lagi." });
+        return res.status(503).json({
+          success: false,
+          error: mailErr.message,
+          stack: mailErr.stack,
+        });
       }
 
       return res.json({
@@ -244,7 +248,11 @@ router.post("/send-otp", otpLimiter, async (req, res, next) => {
       await sendOtpEmail({ to: userEmail, namaUser: userName, otpCode: otpPlain, expiryMin: OTP_EXPIRY_MINUTES });
     } catch (mailErr) {
       console.error('[SEND OTP ERROR]', mailErr);
-      return res.status(503).json({ error: "Gagal mengirim OTP ke email. Coba lagi." });
+      return res.status(503).json({
+        success: false,
+        error: mailErr.message,
+        stack: mailErr.stack,
+      });
     }
 
     res.json({
