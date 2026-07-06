@@ -43,6 +43,7 @@ router.get("/pending", requirePermission("users.approve"), async (_req, res, nex
 // POST /api/users — buat user baru 
 // ─────────────────────────────────────────────────────────────────────────────
 router.post("/", requirePermission("users.manage"), async (req, res, next) => {
+  let conn;
   try {
     const { nama, email, password, role, departemen, nip } = req.body;
 
@@ -62,10 +63,21 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
     const rawPassword = password?.trim() || "Sakura@123";
     const passwordHash = await bcrypt.hash(rawPassword, 10);
 
-    const [result] = await pool.query(
-      `INSERT INTO users (nama, email, password_hash, role, departemen, nip, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'active')`,
+    // users.id BUKAN AUTO_INCREMENT — hitung id berikutnya secara manual,
+    // dibungkus transaksi + FOR UPDATE supaya aman dari race condition.
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [[row]] = await conn.query(
+      "SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM users FOR UPDATE"
+    );
+    const nextId = row.nextId;
+
+    await conn.query(
+      `INSERT INTO users (id, nama, email, password_hash, role, departemen, nip, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
       [
+        nextId,
         nama.trim(),
         email.trim().toLowerCase(),
         passwordHash,
@@ -75,13 +87,20 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
       ]
     );
 
+    await conn.commit();
+
     const [rows] = await pool.query(
       "SELECT id, nama, email, role, departemen, nip, avatar, status, created_at FROM users WHERE id = ?",
-      [result.insertId]
+      [nextId]
     );
 
     res.status(201).json({ message: "User berhasil dibuat", user: rows[0] });
-  } catch (e) { next(e); }
+  } catch (e) {
+    if (conn) await conn.rollback();
+    next(e);
+  } finally {
+    if (conn) conn.release();
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -40,24 +40,43 @@ const otpSchema = z.object({
 
 // ── POST /api/auth/register ───────────────────────────────────────────────────
 router.post("/register", async (req, res, next) => {
+  let conn;
   try {
     const data = registerSchema.parse(req.body);
     const [existing] = await pool.query("SELECT id FROM users WHERE email = ?", [data.email]);
     if (existing.length) return res.status(409).json({ error: "Email sudah terdaftar" });
 
     const hash = await bcrypt.hash(data.password, 10);
-    const [result] = await pool.query(
-      `INSERT INTO users (nama, email, password_hash, role, departemen, nip, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'menunggu_approval')`,
-      [data.nama, data.email, hash, data.role, data.departemen, data.nip]
+
+    // users.id BUKAN AUTO_INCREMENT (skema TiDB tidak mengizinkan ALTER untuk itu),
+    // jadi id berikutnya dihitung manual. Dibungkus transaksi + FOR UPDATE supaya
+    // dua registrasi yang datang bersamaan tidak mendapat id yang sama.
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [[row]] = await conn.query(
+      "SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM users FOR UPDATE"
     );
+    const nextId = row.nextId;
+
+    await conn.query(
+      `INSERT INTO users (id, nama, email, password_hash, role, departemen, nip, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'menunggu_approval')`,
+      [nextId, data.nama, data.email, hash, data.role, data.departemen, data.nip]
+    );
+
+    await conn.commit();
+
     res.status(201).json({
       message: "Pendaftaran berhasil. Menunggu approval admin.",
-      userId: result.insertId,
+      userId: nextId,
     });
   } catch (e) {
+    if (conn) await conn.rollback();
     if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
     next(e);
+  } finally {
+    if (conn) conn.release();
   }
 });
 
