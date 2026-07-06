@@ -1,5 +1,6 @@
 const pool          = require("../config/db");
 const { askGemini } = require("../services/geminiService");
+const { classifyIntent } = require("../utils/chatIntent");
 
 // FIX: naikkan cache TTL dari 3 menit → 10 menit.
 // Pertanyaan yang sama dalam 10 menit langsung balik dari cache, 0 panggilan Gemini.
@@ -38,8 +39,9 @@ function markUserRequest(userId) {
 const BASE_SYSTEM_PROMPT = `Kamu adalah SAKURA AI, asisten manajemen dokumen sekolah.
 Jawab HANYA berdasarkan DATA SISTEM di bawah. Jangan mengarang data.
 Bahasa Indonesia, singkat, ramah, solutif. Gunakan poin jika lebih dari 1 item.
-Jika data tidak tersedia, jelaskan fitur terkait dan arahkan ke halaman relevan
-(sertakan path dalam tanda kurung, contoh: "buka halaman Upload (/upload)").`;
+Jika user hanya bertanya jumlah/statistik/status dokumen, jawab dengan angka atau
+ringkasan datanya saja — jangan menyarankan atau menyebutkan halaman/menu lain
+kecuali user secara eksplisit meminta diarahkan/dibuka/ditampilkan ke suatu halaman.`;
 
 // ── Helper: strip markdown code fence yang kadang ditambahkan Gemini ──────────
 // FIX UTAMA: Gemini sering membungkus respons JSON dengan ```json ... ```
@@ -168,20 +170,21 @@ async function handleChat(req, res) {
     const context      = await buildContext(trimmed, req.user);
     const systemPrompt = `${BASE_SYSTEM_PROMPT}\n\nDATA SISTEM:\n${context.text}`;
 
-    // Instruksi JSON — singkat agar hemat token
+    // Instruksi JSON — Gemini HANYA bertugas menjawab teks. Keputusan
+    // "tampilkan tombol navigasi atau tidak" & "link mana yang benar" TIDAK
+    // lagi diserahkan ke Gemini (lihat utils/chatIntent.js) — supaya hasilnya
+    // konsisten dan tidak bergantung pada tebakan AI per request.
     const jsonInstruction =
       `\n\nBALAS HANYA dengan JSON valid (tanpa teks lain, tanpa markdown fence):\n` +
-      `{"text":"<jawaban>","links":[{"label":"<label>","path":"/<route>"}]}\n` +
-      `Jika tidak ada link navigasi, gunakan "links":[].`;
+      `{"text":"<jawaban>"}`;
 
     const raw = await askGemini(systemPrompt + jsonInstruction, trimmed);
 
     // FIX: strip markdown fence SEBELUM parse
     const cleaned = stripFences(raw);
 
-    let parsed      = null;
-    let answerText  = cleaned;
-    let links       = [];
+    let parsed     = null;
+    let answerText = cleaned;
 
     // Coba parse JSON
     try {
@@ -197,20 +200,22 @@ async function handleChat(req, res) {
 
     if (parsed && typeof parsed.text === "string") {
       answerText = parsed.text;
-      if (Array.isArray(parsed.links)) {
-        links = parsed.links
-          .map(l => ({ label: String(l.label || `Buka ${l.path || ""}`).trim(), path: String(l.path || "").trim() }))
-          .filter(l => l.path);
-      }
-    } else {
-      // Fallback terakhir: ambil teks mentah dari AI, cari path-path di dalamnya
-      // (tidak ada JSON valid → jawab apa adanya)
-      const pathRegex  = /\/(?:[a-z0-9\-_/]+)/gi;
-      const foundPaths = Array.from(new Set((answerText.match(pathRegex) || []).map(p => p.trim())));
-      links = foundPaths.map(p => ({ label: `Buka ${p}`, path: p }));
+    }
+    // Kalau JSON tidak valid, `answerText` tetap berisi teks mentah dari
+    // Gemini (cleaned) — dijawab apa adanya, tanpa scan path/keyword apapun
+    // dari teks tersebut. Link navigasi murni berasal dari classifyIntent()
+    // di bawah, berbasis PERTANYAAN USER, bukan jawaban AI.
+
+    // ── Intent detection & route mapping (deterministik, backend-only) ────
+    const intent = classifyIntent(trimmed);
+    let links = [];
+    if (intent.type !== "information" && intent.link) {
+      links.push({ label: intent.link.label, path: intent.link.path });
     }
 
-    // Tambah link langsung ke dokumen dari DB
+    // Tambah link langsung ke dokumen dari DB (hasil pencarian/menunggu),
+    // tetap tampil apa adanya karena ini link ke dokumen spesifik, bukan
+    // tombol navigasi halaman umum.
     if (context.results?.length) {
       for (const r of context.results) {
         if (r.type === "document" && r.id) {
