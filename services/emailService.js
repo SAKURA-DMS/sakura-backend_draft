@@ -12,6 +12,13 @@ const transporter = nodemailer.createTransport({
   tls: {
     rejectUnauthorized: process.env.NODE_ENV === "production",
   },
+  // Tanpa timeout eksplisit, default nodemailer jauh lebih lama daripada
+  // timeout request di frontend (15s), sehingga kalau SMTP gagal/nyangkut,
+  // client sudah keburu "timeout of 15000ms exceeded" duluan sebelum
+  // backend sempat melempar error SMTP yang sebenarnya.
+  connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 10000), // gagal connect ke server SMTP
+  greetingTimeout:   Number(process.env.SMTP_GREETING_TIMEOUT_MS || 10000),   // server tidak balas greeting SMTP
+  socketTimeout:     Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 10000),     // koneksi diam/macet di tengah jalan
 });
 
 /**
