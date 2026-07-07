@@ -1,45 +1,26 @@
-const nodemailer = require("nodemailer");
-const dns = require("dns");
+const axios = require("axios");
 
-// Railway (dan banyak platform container lain) tidak punya egress IPv6.
-// Node 18+ tetap mencoba alamat IPv6 duluan kalau DNS mengembalikannya,
-// sehingga koneksi SMTP gagal dengan "ENETUNREACH ...". Paksa urutan
-// resolusi DNS ke IPv4 dulu secara global untuk proses ini.
-dns.setDefaultResultOrder("ipv4first");
-
-// ── Buat transporter sekali saja (singleton) ──────────────────────────────────
-const transporter = nodemailer.createTransport({
-  host:   process.env.SMTP_HOST || "smtp.gmail.com",
-  port:   Number(process.env.SMTP_PORT || 587),
-  secure: process.env.SMTP_SECURE === "true",
-  family: 4, // paksa IPv4 saja untuk koneksi socket SMTP-nya sendiri
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: process.env.NODE_ENV === "production",
-  },
-  // Tanpa timeout eksplisit, default nodemailer jauh lebih lama daripada
-  // timeout request di frontend (15s), sehingga kalau SMTP gagal/nyangkut,
-  // client sudah keburu "timeout of 15000ms exceeded" duluan sebelum
-  // backend sempat melempar error SMTP yang sebenarnya.
-  connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 10000), // gagal connect ke server SMTP
-  greetingTimeout:   Number(process.env.SMTP_GREETING_TIMEOUT_MS || 10000),   // server tidak balas greeting SMTP
-  socketTimeout:     Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 10000),     // koneksi diam/macet di tengah jalan
-});
+// Railway (dan banyak platform container/PaaS lain) memblokir outbound
+// traffic di port SMTP (25/465/587), jadi koneksi nodemailer -> smtp.gmail.com
+// selalu gagal dengan "Connection timeout" di production meskipun jalan
+// normal di local. Solusinya: kirim email lewat HTTP API (Resend), bukan
+// lewat socket SMTP, karena HTTPS (443) tidak diblokir Railway.
+//
+// Env var yang dibutuhkan di Railway:
+//   RESEND_API_KEY = re_xxxxxxxx        (dari https://resend.com/api-keys)
+//   RESEND_FROM    = "Sakura DMS <onboarding@resend.dev>"  (atau domain terverifikasi sendiri)
+const RESEND_API_URL = "https://api.resend.com/emails";
 
 /**
- * Verifikasi koneksi SMTP saat server start.
- * Non-fatal — hanya log warning jika gagal.
+ * Cek konfigurasi Resend saat server start.
+ * Non-fatal — hanya log warning jika API key belum di-set.
  */
 async function verifySmtp() {
-  try {
-    await transporter.verify();
-    console.log("✅ SMTP connection verified");
-  } catch (err) {
-    console.warn("⚠️  SMTP connection failed:", err.message);
+  if (!process.env.RESEND_API_KEY) {
+    console.warn("⚠️  RESEND_API_KEY belum diset — pengiriman OTP email akan gagal");
+    return;
   }
+  console.log("✅ Resend email API configured");
 }
 
 /**
@@ -163,18 +144,38 @@ async function sendOtpEmail({ to, namaUser, otpCode, expiryMin = 5 }) {
   const html    = buildOtpEmailHtml(namaUser, otpCode, expiryMin);
 
   console.log("SEND OTP TO:", to);
-  console.log("SMTP HOST:", process.env.SMTP_HOST);
-  console.log("SMTP USER:", process.env.SMTP_USER);
-  await transporter.verify();
 
-  await transporter.sendMail({
-    from:    process.env.SMTP_FROM || `"Sakura DMS" <${process.env.SMTP_USER}>`,
-    to,
-    subject,
-    html,
-    // Fallback teks polos
-    text: `Kode OTP Anda: ${otpCode}\nBerlaku ${expiryMin} menit. Jangan bagikan ke siapapun.`,
-  });
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error("RESEND_API_KEY belum diset di environment variables");
+  }
+
+  try {
+    await axios.post(
+      RESEND_API_URL,
+      {
+        from:    process.env.RESEND_FROM || "Sakura DMS <onboarding@resend.dev>",
+        to,
+        subject,
+        html,
+        // Fallback teks polos
+        text: `Kode OTP Anda: ${otpCode}\nBerlaku ${expiryMin} menit. Jangan bagikan ke siapapun.`,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 10000,
+      }
+    );
+  } catch (err) {
+    // Normalisasi error dari axios supaya pesannya jelas di response 503
+    // yang dikembalikan auth.js, sama seperti sebelumnya dengan nodemailer.
+    const apiMessage = err.response?.data?.message || err.message;
+    const normalized  = new Error(`Resend API error: ${apiMessage}`);
+    normalized.stack  = err.stack;
+    throw normalized;
+  }
 }
 
 module.exports = { verifySmtp, sendOtpEmail };
