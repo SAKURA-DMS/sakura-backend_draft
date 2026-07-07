@@ -50,7 +50,7 @@ function buildOtpEmailHtml(namaUser, otpCode, expiryMin = 5) {
     <!-- Banner -->
 <div style="background:#f9e7ef;">
   <img
-    src="./sakura_branch.png"
+    src="https://sakuradms.netlify.app/sakura_branch.png"
     alt="Sakura branch"
     style="
       display:block;
@@ -77,7 +77,7 @@ function buildOtpEmailHtml(namaUser, otpCode, expiryMin = 5) {
 >
 
   <img
-    src="./logo_sakura.png"
+    src="https://sakuradms.netlify.app/logo_sakura.png"
     alt="Logo SAKURA"
     style="
       width:54px;

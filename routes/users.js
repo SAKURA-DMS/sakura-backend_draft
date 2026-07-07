@@ -47,16 +47,25 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
   try {
     const { nama, email, password, role, departemen, nip } = req.body;
 
-    if (!nama?.trim())  return res.status(400).json({ error: "nama wajib diisi" });
-    if (!email?.trim()) return res.status(400).json({ error: "email wajib diisi" });
+    if (!nama?.trim())  return res.status(400).json({ error: "Nama lengkap wajib diisi." });
+    if (!email?.trim()) return res.status(400).json({ error: "Email wajib diisi." });
+
+    const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!EMAIL_REGEX.test(email.trim())) {
+      return res.status(400).json({ error: "Format email tidak valid." });
+    }
 
     const validRoles = ["Guru", "Kepala Sekolah", "Operator/TU"];
-    const userRole = validRoles.includes(role) ? role : "Guru";
+    if (!role?.trim())            return res.status(400).json({ error: "Role wajib dipilih." });
+    if (!validRoles.includes(role)) return res.status(400).json({ error: "Role tidak valid." });
+    const userRole = role;
+
+    if (!departemen?.trim())     return res.status(400).json({ error: "Departemen wajib diisi." });
 
     // Cek email unik
     const [existing] = await pool.query("SELECT id FROM users WHERE email = ?", [email.trim()]);
     if (existing.length) {
-      return res.status(409).json({ error: "Email sudah terdaftar" });
+      return res.status(409).json({ error: "Email sudah terdaftar." });
     }
 
     // Hash password — gunakan default jika tidak disediakan
