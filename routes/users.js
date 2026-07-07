@@ -68,7 +68,10 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
       return res.status(409).json({ error: "Email sudah terdaftar." });
     }
 
-    // Hash password — gunakan default jika tidak disediakan
+    // Hash password — gunakan default jika tidak disediakan. Jika admin
+    // tidak mengisi password custom, akun ini memakai password default
+    // (Sakura@123) sehingga user WAJIB menggantinya saat login pertama.
+    const usingDefaultPassword = !password?.trim();
     const rawPassword = password?.trim() || "Sakura@123";
     const passwordHash = await bcrypt.hash(rawPassword, 10);
 
@@ -83,8 +86,8 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
     const nextId = row.nextId;
 
     await conn.query(
-      `INSERT INTO users (id, nama, email, password_hash, role, departemen, nip, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+      `INSERT INTO users (id, nama, email, password_hash, role, departemen, nip, status, must_change_password)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
       [
         nextId,
         nama.trim(),
@@ -93,6 +96,7 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
         userRole,
         departemen?.trim() || "",
         nip?.trim() || "",
+        usingDefaultPassword ? 1 : 0,
       ]
     );
 

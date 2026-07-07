@@ -359,12 +359,18 @@ router.get("/me", authRequired, async (req, res, next) => {
       [req.user.id]
     );
     const [rows] = await pool.query(
-      "SELECT id, nama, email, role, departemen, nip, avatar, status, is_2fa_enabled FROM users WHERE id = ?",
+      "SELECT id, nama, email, role, departemen, nip, avatar, status, is_2fa_enabled, must_change_password FROM users WHERE id = ?",
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: "User tidak ditemukan" });
     const u = rows[0];
-    res.json({ user: { ...u, twoFactorEnabled: !!u.is_2fa_enabled } });
+    res.json({
+      user: {
+        ...u,
+        twoFactorEnabled:   !!u.is_2fa_enabled,
+        mustChangePassword: !!u.must_change_password,
+      },
+    });
   } catch (e) {
     next(e);
   }
@@ -383,8 +389,13 @@ router.post("/change-password", authRequired, async (req, res, next) => {
     const ok = await bcrypt.compare(oldPassword, rows[0].password_hash);
     if (!ok) return res.status(400).json({ error: "Password lama salah" });
     const hash = await bcrypt.hash(newPassword, 10);
-    await pool.query("UPDATE users SET password_hash = ? WHERE id = ?", [hash, req.user.id]);
-    res.json({ message: "Password berhasil diubah" });
+    // Password berhasil diganti → hapus penanda "masih pakai password awal"
+    // supaya halaman wajib-ganti-password tidak muncul lagi di login berikutnya.
+    await pool.query(
+      "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
+      [hash, req.user.id]
+    );
+    res.json({ message: "Password berhasil diubah", mustChangePassword: false });
   } catch (e) {
     if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
     next(e);
@@ -394,15 +405,16 @@ router.post("/change-password", authRequired, async (req, res, next) => {
 // ── Helper ────────────────────────────────────────────────────────────────────
 function _publicUser(user) {
   return {
-    id:               user.id,
-    nama:             user.nama,
-    email:            user.email,
-    role:             user.role,
-    departemen:       user.departemen,
-    nip:              user.nip,
-    avatar:           user.avatar,
-    status:           user.status,
-    twoFactorEnabled: !!user.is_2fa_enabled,
+    id:                 user.id,
+    nama:               user.nama,
+    email:              user.email,
+    role:               user.role,
+    departemen:         user.departemen,
+    nip:                user.nip,
+    avatar:             user.avatar,
+    status:             user.status,
+    twoFactorEnabled:   !!user.is_2fa_enabled,
+    mustChangePassword: !!user.must_change_password,
   };
 }
 
