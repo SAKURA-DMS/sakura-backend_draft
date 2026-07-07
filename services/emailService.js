@@ -1,15 +1,19 @@
-const axios = require("axios");
+const { Resend } = require("resend");
 
 // Railway (dan banyak platform container/PaaS lain) memblokir outbound
 // traffic di port SMTP (25/465/587), jadi koneksi nodemailer -> smtp.gmail.com
-// selalu gagal dengan "Connection timeout" di production meskipun jalan
-// normal di local. Solusinya: kirim email lewat HTTP API (Resend), bukan
-// lewat socket SMTP, karena HTTPS (443) tidak diblokir Railway.
+// selalu gagal dengan "Connection timeout" / "ENETUNREACH" di production
+// meskipun jalan normal di local. Solusinya: kirim email lewat HTTP API
+// (Resend), bukan lewat socket SMTP, karena HTTPS (443) tidak diblokir Railway.
 //
 // Env var yang dibutuhkan di Railway:
 //   RESEND_API_KEY = re_xxxxxxxx        (dari https://resend.com/api-keys)
 //   RESEND_FROM    = "Sakura DMS <onboarding@resend.dev>"  (atau domain terverifikasi sendiri)
-const RESEND_API_URL = "https://api.resend.com/emails";
+//
+// PENTING: instance Resend dibuat sekali saat modul di-load (singleton),
+// BUKAN dengan panggilan HTTP manual (axios) — supaya tidak ada jalur kode
+// lain yang diam-diam membuka socket TCP mentah ke luar SDK resend.
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 /**
  * Cek konfigurasi Resend saat server start.
@@ -145,37 +149,26 @@ async function sendOtpEmail({ to, namaUser, otpCode, expiryMin = 5 }) {
 
   console.log("SEND OTP TO:", to);
 
-  if (!process.env.RESEND_API_KEY) {
+  if (!resend) {
     throw new Error("RESEND_API_KEY belum diset di environment variables");
   }
 
-  try {
-    await axios.post(
-      RESEND_API_URL,
-      {
-        from:    process.env.RESEND_FROM || "Sakura DMS <onboarding@resend.dev>",
-        to,
-        subject,
-        html,
-        // Fallback teks polos
-        text: `Kode OTP Anda: ${otpCode}\nBerlaku ${expiryMin} menit. Jangan bagikan ke siapapun.`,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 10000,
-      }
-    );
-  } catch (err) {
-    // Normalisasi error dari axios supaya pesannya jelas di response 503
-    // yang dikembalikan auth.js, sama seperti sebelumnya dengan nodemailer.
-    const apiMessage = err.response?.data?.message || err.message;
-    const normalized  = new Error(`Resend API error: ${apiMessage}`);
-    normalized.stack  = err.stack;
-    throw normalized;
+  const { data, error } = await resend.emails.send({
+    from:    process.env.RESEND_FROM || "Sakura DMS <onboarding@resend.dev>",
+    to,
+    subject,
+    html,
+    // Fallback teks polos
+    text: `Kode OTP Anda: ${otpCode}\nBerlaku ${expiryMin} menit. Jangan bagikan ke siapapun.`,
+  });
+
+  if (error) {
+    // Normalisasi error dari Resend SDK supaya pesannya jelas di response 503
+    // yang dikembalikan auth.js, sama seperti sebelumnya.
+    throw new Error(`Resend API error: ${error.message || JSON.stringify(error)}`);
   }
+
+  console.log("RESEND OTP SENT, id:", data?.id);
 }
 
 module.exports = { verifySmtp, sendOtpEmail };
