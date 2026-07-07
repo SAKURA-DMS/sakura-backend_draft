@@ -1,10 +1,18 @@
 const nodemailer = require("nodemailer");
+const dns = require("dns");
+
+// Railway (dan banyak platform container lain) tidak punya egress IPv6.
+// Node 18+ tetap mencoba alamat IPv6 duluan kalau DNS mengembalikannya,
+// sehingga koneksi SMTP gagal dengan "ENETUNREACH ...". Paksa urutan
+// resolusi DNS ke IPv4 dulu secara global untuk proses ini.
+dns.setDefaultResultOrder("ipv4first");
 
 // ── Buat transporter sekali saja (singleton) ──────────────────────────────────
 const transporter = nodemailer.createTransport({
   host:   process.env.SMTP_HOST || "smtp.gmail.com",
   port:   Number(process.env.SMTP_PORT || 587),
   secure: process.env.SMTP_SECURE === "true",
+  family: 4, // paksa IPv4 saja untuk koneksi socket SMTP-nya sendiri
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
