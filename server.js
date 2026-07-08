@@ -40,10 +40,10 @@ let storageStatus = { ok: null, message: "Belum dicek" };
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) =>
   res.json({
-    status:  "ok",
-    service: "sakura-dms-backend",
-    time:    new Date().toISOString(),
-    azure:   storageStatus,
+    status:         "ok",
+    service:        "sakura-dms-backend",
+    time:           new Date().toISOString(),
+    firebaseStorage: storageStatus,
   })
 );
 

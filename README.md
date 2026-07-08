@@ -11,13 +11,13 @@ Sesuai dokumen *Product Development & Operational Environment*:
 | Runtime          | **Node.js 18+**                                     |
 | Framework        | **Express.js 4**                                    |
 | Upload handler   | **Multer** (`multipart/form-data`, memory storage)  |
-| Database         | **MySQL 8** (lokal: XAMPP / phpMyAdmin · produksi: Azure Database for MySQL) |
-| Cloud Storage    | **Azure Blob Storage** (`@azure/storage-blob`)      |
+| Database         | **MySQL-compatible** (lokal: XAMPP / phpMyAdmin · produksi: **TiDB Cloud**) |
+| Cloud Storage    | **Firebase Storage** (`firebase-admin`) — hanya untuk file fisik, metadata tetap di TiDB/MySQL |
 | Auth             | **JWT** + **bcrypt** (hash password cost 10)        |
 | Validasi         | **zod**                                             |
 | Security         | helmet, cors, express-rate-limit                    |
 | Dev tools        | nodemon, Postman                                    |
-| Deploy           | Azure App Service                                   |
+| Deploy           | **Railway** (backend) + **Netlify** (frontend)      |
 
 ---
 
@@ -26,8 +26,9 @@ Sesuai dokumen *Product Development & Operational Environment*:
 ```
 backend/
 ├── config/
-│   ├── db.js              # MySQL connection pool (mysql2/promise)
-│   └── azureBlob.js       # Helper upload/delete ke Azure Blob Storage
+│   └── db.js              # MySQL/TiDB connection pool (mysql2/promise)
+├── services/
+│   └── firebaseStorage.js # uploadFile, getFileUrl, downloadFileBuffer, deleteFile, checkFileExists ke Firebase Storage
 ├── middleware/
 │   ├── auth.js            # JWT verify + signToken
 │   ├── rbac.js            # requirePermission(key) / requireRole(...)
@@ -87,16 +88,16 @@ npm run dev
 
 | Resource          | Layanan                              |
 | ----------------- | ------------------------------------ |
-| API server        | **Azure App Service** (Node.js)      |
-| Database          | **Azure Database for MySQL**         |
-| File storage      | **Azure Blob Storage** (container `sakura-documents`) |
+| API server        | **Railway** (Node.js)                |
+| Database          | **TiDB Cloud** (MySQL-compatible)    |
+| File storage      | **Firebase Storage** (bucket `sakura-dms-xxxxx.firebasestorage.app`) |
 | Frontend          | **Netlify** (sudah ada)              |
 
-Set environment variable di Azure App Service mengikuti `.env.example`,
+Set environment variable di Railway mengikuti `.env.example`,
 khususnya:
 
 - `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_SSL=true`
-- `AZURE_STORAGE_CONNECTION_STRING`
+- `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_STORAGE_BUCKET`
 - `JWT_SECRET` (string acak panjang)
 - `CORS_ORIGIN=https://<nama-app>.netlify.app`
 
@@ -127,13 +128,13 @@ Base URL: `/api`
   ```
   Backend:
   1. Multer parse file → buffer
-  2. Upload buffer ke Azure Blob → dapat URL
+  2. Upload buffer ke Firebase Storage → dapat `file_blob_name` (path) + `file_url`
   3. Generate nomor dokumen `PREFIX/YYYY/NNN` (transactional, baris counter dikunci `FOR UPDATE`)
-  4. Insert ke `documents` + tabel metadata sesuai kategori
+  4. Insert ke `documents` (TiDB/MySQL) + tabel metadata sesuai kategori
   5. Tulis audit trail + notifikasi ke approver
 - `POST /:id/approve` · `POST /:id/reject`
 - `PATCH /:id`
-- `DELETE /:id` (soft delete) · `POST /:id/restore` · `DELETE /:id/permanent` (hapus blob juga)
+- `DELETE /:id` (soft delete) · `POST /:id/restore` (validasi file masih ada di Firebase Storage sebelum dipulihkan) · `DELETE /:id/permanent` (hapus file di Firebase Storage juga)
 
 ### Folders, Categories, Notifications, Audit, Roles
 Lihat masing-masing file di `routes/`.
@@ -149,7 +150,7 @@ Lihat `database/schema.sql`. Ringkasan tabel:
 3. `categories`, `document_types` — master data sesuai mockData frontend
 4. `folders` — hierarkis (`parent_id`), mendukung folder kustom (`is_custom = 1`)
 5. `document_counters` — generator nomor dokumen per (prefix, tahun)
-6. `documents` — entitas utama, simpan URL Azure Blob + `file_blob_name` untuk delete
+6. `documents` — entitas utama, simpan `file_url` (URL Firebase Storage) + `file_blob_name` (path di bucket, dipakai untuk get/download/delete)
 7. **Metadata per kategori** (one-to-one ke `documents`):
    - `student_records`     → Data Siswa
    - `teacher_records`     → Data Guru
@@ -216,8 +217,9 @@ await api("/documents", { method: "POST", body: fd, isForm: true });
 - ✅ Upload dibatasi MIME type & ukuran (`MAX_UPLOAD_MB`)
 - ✅ MySQL pakai prepared statement (`mysql2`) — anti SQL injection
 - ✅ RBAC dinamis: setiap endpoint penting di-gate via `requirePermission(...)`
-- ✅ SSL ke Azure MySQL via `DB_SSL=true`
-- ✅ HTTPS handled by Azure App Service / Netlify
+- ✅ SSL ke TiDB Cloud via `DB_SSL=true`
+- ✅ HTTPS handled by Railway / Netlify
+- ✅ Firebase Storage Rules menolak semua akses langsung dari client (`allow read/write: if false`) — file hanya bisa diakses lewat backend (Admin SDK) atau URL bertoken yang dikeluarkan backend
 
 ---
 

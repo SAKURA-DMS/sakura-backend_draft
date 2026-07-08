@@ -194,6 +194,17 @@ async function deleteFile(filePath) {
   }
 }
 
+async function checkFileExists(filePath) {
+  if (!filePath) return false;
+  try {
+    const [exists] = await getBucket().file(filePath).exists();
+    return exists;
+  } catch (err) {
+    console.warn("[FirebaseStorage] checkFileExists warning:", err.message);
+    return false;
+  }
+}
+
 async function checkConnection() {
   const bucketName = getBucketName();
   try {
@@ -213,5 +224,6 @@ module.exports = {
   deleteFile,
   getFileUrl,
   downloadFileBuffer,
+  checkFileExists,
   checkConnection,
 };

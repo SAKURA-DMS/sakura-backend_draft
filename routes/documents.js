@@ -8,6 +8,7 @@ const {
   deleteFile,
   getFileUrl,
   downloadFileBuffer,
+  checkFileExists,
 } = require("../services/firebaseStorage");
 const { generateAuditHash } = require("../utils/auditHash");
 
@@ -15,11 +16,6 @@ const router = express.Router();
 router.use(authRequired);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-// Format nomor dokumen: [KODE_KATEGORI]-[KODE_JENIS]-[TAHUN]-[RUNNING_NUMBER]
-// Contoh: DS-IJZ-2026-000001
-// Running number auto-increment per KOMBINASI kategori + jenis (bukan per
-// jenis saja), dan reset ke 1 setiap tahun berganti.
 async function generateDocumentNumber(conn, categoryId, typeId) {
   const [[cat]] = await conn.query(
     "SELECT code_prefix FROM categories WHERE category_id = ?",
@@ -144,9 +140,6 @@ router.get("/", async (req, res, next) => {
     if (tahun_ajaran){ where.push("d.tahun_ajaran = ?");                  params.push(tahun_ajaran); }
     if (q)           { where.push("(d.judul LIKE ? OR d.nomor_dokumen LIKE ?)"); params.push(`%${q}%`, `%${q}%`); }
 
-    // Guru cuma boleh melihat dokumen miliknya sendiri. Ini di-enforce di
-    // level query (bukan cuma disembunyikan di UI) supaya tidak bisa
-    // dilewati dengan memanggil API secara langsung.
     if (req.user.role === "Guru") {
       where.push("d.uploaded_by = ?");
       params.push(req.user.id);
@@ -167,11 +160,6 @@ router.get("/", async (req, res, next) => {
 });
 
 // ── GET /api/documents/next-number — preview nomor dokumen berikutnya ─────────
-// Dipakai frontend untuk menampilkan field "Nomor Dokumen" (readonly) di form
-// upload SEBELUM dokumen benar-benar disimpan. Ini hanya intip nilai
-// last_seq+1 tanpa mengunci/menambah counter, jadi nomor final yang benar-benar
-// tersimpan (dari generateDocumentNumber saat submit) tetap dijamin unik &
-// berurutan walau ada beberapa user yang preview di waktu bersamaan.
 router.get("/meta/next-number", async (req, res, next) => {
   try {
     const { category_id, type_id } = req.query;
@@ -229,7 +217,6 @@ router.get("/:id", async (req, res, next) => {
       [req.params.id]
     );
 
-    // Metadata per kategori
     let metadata = null;
     const metaTableByCategory = { 1: "student_records", 2: "teacher_records", 3: "inventory_items" };
     if (metaTableByCategory[doc.category_id]) {
@@ -247,17 +234,16 @@ router.get("/:id", async (req, res, next) => {
       }
     }
 
-    // Catat "Melihat dokumen" ke audit trail (non-blocking)
     pool.query(
       "INSERT INTO audit_trail (document_id, user_id, action) VALUES (?, ?, 'Melihat dokumen')",
       [doc.id, req.user.id]
-    ).catch(() => {}); // jangan gagalkan response jika audit gagal
+    ).catch(() => {}); 
 
     res.json({ document: doc, auditTrail: trail, metadata });
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/download — SAS URL sementara (60 menit) ────────────
+// ── GET /api/documents/:id/download — URL Firebase Storage bertoken ───────────
 router.get("/:id/download", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -266,16 +252,15 @@ router.get("/:id/download", async (req, res, next) => {
     );
     if (!doc)          return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "Blob name tidak ditemukan untuk dokumen ini" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan untuk dokumen ini" });
 
     const expiryMinutes = Number(req.query.expiry) || 60;
-    const sasUrl = await getFileUrl(doc.file_blob_name);
+    const fileUrl = await getFileUrl(doc.file_blob_name);
 
-    // Audit: catat akses download
-    await addAudit(pool, doc.id, req.user.id, `Mengunduh dokumen (SAS ${expiryMinutes} menit)`);
+    await addAudit(pool, doc.id, req.user.id, `Mengunduh dokumen (link ${expiryMinutes} menit)`);
 
     res.json({
-      url:           sasUrl,
+      url:           fileUrl,
       expiresInSec:  expiryMinutes * 60,
       filename:      doc.original_filename || doc.judul,
       mimeType:      doc.mime_type,
@@ -283,7 +268,7 @@ router.get("/:id/download", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/preview — SAS URL singkat untuk preview (tanpa audit download) ──
+// ── GET /api/documents/:id/preview — URL Firebase Storage untuk preview (tanpa audit download) ──
 router.get("/:id/preview", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -292,12 +277,12 @@ router.get("/:id/preview", async (req, res, next) => {
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "Blob name tidak ditemukan untuk dokumen ini" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan untuk dokumen ini" });
 
-    const sasUrl = await getFileUrl(doc.file_blob_name);
+    const fileUrl = await getFileUrl(doc.file_blob_name);
 
     res.json({
-      url:      sasUrl,
+      url:      fileUrl,
       filename: doc.original_filename || doc.judul,
       mimeType: doc.mime_type,
     });
@@ -313,12 +298,10 @@ router.get("/:id/download-stream", async (req, res, next) => {
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "Blob name tidak ditemukan" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan" });
 
-    // Download buffer dari storage
     const buffer = await downloadFileBuffer(doc.file_blob_name);
 
-    // Audit
     await addAudit(pool, doc.id, req.user.id, "Mengunduh dokumen original (stream)");
 
     const origName = doc.original_filename || doc.judul;
@@ -338,7 +321,6 @@ router.post(
   requirePermission("documents.upload"),
   upload.single("file"),
   async (req, res, next) => {
-    // ── Validasi awal (sebelum menyentuh storage) ─────────────────────────────
     if (!req.file) {
       return res.status(400).json({ error: "File wajib diupload (field name: file)" });
     }
@@ -356,7 +338,6 @@ router.post(
       return res.status(400).json({ error: "Field metadata bukan JSON valid" });
     }
 
-    // ── Upload ke Firebase Storage DULU (sebelum transaksi DB) ────────────────
     let blob;
     try {
       blob = await uploadFile(req.file, category_id);
@@ -473,7 +454,6 @@ router.post(
       });
     } catch (dbErr) {
       await conn.rollback();
-      // Rollback file yang sudah terupload agar tidak ada orphan
       console.error("[Upload] DB error setelah Firebase upload — rolling back file:", blob?.blobName);
       if (blob?.blobName) {
         await deleteFile(blob.blobName).catch((e) =>
@@ -495,7 +475,6 @@ router.patch(
   async (req, res, next) => {
     if (!req.file) return res.status(400).json({ error: "File baru wajib diupload (field name: file)" });
 
-    // Ambil file lama
     const [[doc]] = await pool.query(
       "SELECT id, judul, category_id, file_blob_name, versi, deleted_at FROM documents WHERE id = ?",
       [req.params.id]
@@ -503,7 +482,6 @@ router.patch(
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
 
-    // Upload file baru ke Firebase Storage
     let newBlob;
     try {
       newBlob = await uploadFile(req.file, doc.category_id);
@@ -552,13 +530,11 @@ router.patch(
 
       await conn.commit();
 
-      // Hapus file lama SETELAH commit DB berhasil
       if (oldBlobName) await deleteFile(oldBlobName);
 
       res.json({ message: "File berhasil diganti", versi: newVersi, file_url: newBlob.url });
     } catch (dbErr) {
       await conn.rollback();
-      // Rollback file baru
       if (newBlob?.blobName) await deleteFile(newBlob.blobName).catch(() => {});
       next(dbErr);
     } finally {
@@ -629,7 +605,6 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       return res.status(400).json({ error: "Dokumen tidak dalam status Menunggu" });
     }
 
-    // Update approval_requests yang pending untuk dokumen ini
     await conn.query(
       `UPDATE approval_requests
          SET status='approved', approver_id=?, approver_note=?, decided_at=NOW()
@@ -695,7 +670,6 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       return res.status(400).json({ error: "Dokumen tidak dalam status Menunggu" });
     }
 
-    // Update approval_requests yang pending untuk dokumen ini
     await conn.query(
       `UPDATE approval_requests
          SET status='rejected', approver_id=?, approver_note=?, decided_at=NOW()
@@ -758,6 +732,21 @@ router.delete("/:id", requirePermission("documents.delete"), async (req, res, ne
 // ── POST /api/documents/:id/restore ──────────────────────────────────────────
 router.post("/:id/restore", requirePermission("documents.delete"), async (req, res, next) => {
   try {
+    const [[doc]] = await pool.query(
+      "SELECT id, file_blob_name FROM documents WHERE id = ?",
+      [req.params.id]
+    );
+    if (!doc) return res.status(404).json({ error: "Dokumen tidak ditemukan" });
+
+    if (doc.file_blob_name) {
+      const exists = await checkFileExists(doc.file_blob_name);
+      if (!exists) {
+        return res.status(409).json({
+          error: "File dokumen tidak ditemukan di Firebase Storage, tidak bisa dipulihkan",
+        });
+      }
+    }
+
     await pool.query("UPDATE documents SET deleted_at = NULL WHERE id = ?", [req.params.id]);
     await addAudit(
         pool,
