@@ -812,59 +812,79 @@ router.delete("/:id/permanent", requirePermission("documents.delete"), async (re
   } catch (e) { next(e); }
 });
 
+// ── getNextId ──────────────────────────────────────────────────────────────────
+// Workaround yang sama seperti pada insert ke `documents`: karena kolom `id`
+// di skema TiDB/MySQL saat ini didefinisikan sebagai `int NOT NULL` TANPA
+// `AUTO_INCREMENT`, kita harus hitung ID berikutnya secara manual sebelum
+// INSERT, untuk SETIAP tabel metadata (student_records, teacher_records, dst).
+// `FOR UPDATE` dipakai supaya aman dari race condition ringan selama masih
+// di dalam transaksi yang sama (conn.beginTransaction()).
+async function getNextId(conn, table) {
+  const [[row]] = await conn.query(
+    `SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM \`${table}\` FOR UPDATE`
+  );
+  return row.nextId;
+}
+
 // ── insertMetadata ────────────────────────────────────────────────────────────
 async function insertMetadata(conn, docId, categoryId, typeId, meta) {
   if (!meta || typeof meta !== "object") return;
 
   if (categoryId === 1) {
+    const nextId = await getNextId(conn, "student_records");
     await conn.query(
       `INSERT INTO student_records
-       (document_id, nama_siswa, nis, nisn, kelas, tahun_ajaran,
+       (id, document_id, nama_siswa, nis, nisn, kelas, tahun_ajaran,
         tempat_lahir, tanggal_lahir, jenis_kelamin, nama_orang_tua, no_hp_orang_tua)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [docId, meta.namaSiswa || null, meta.nis || null, meta.nisn || null, meta.kelas || null,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [nextId, docId, meta.namaSiswa || null, meta.nis || null, meta.nisn || null, meta.kelas || null,
        meta.tahunAjaran || null, meta.tempatLahir || null, meta.tanggalLahir || null,
        meta.jenisKelamin || null, meta.namaOrangTua || null, meta.noHpOrangTua || null]
     );
   } else if (categoryId === 2) {
+    const nextId = await getNextId(conn, "teacher_records");
     await conn.query(
       `INSERT INTO teacher_records
-       (document_id, nama_guru, nip, nuptk, mata_pelajaran, pendidikan_terakhir, status_kepegawaian)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [docId, meta.namaGuru || null, meta.nip || null, meta.nuptk || null,
+       (id, document_id, nama_guru, nip, nuptk, mata_pelajaran, pendidikan_terakhir, status_kepegawaian)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [nextId, docId, meta.namaGuru || null, meta.nip || null, meta.nuptk || null,
        meta.mataPelajaran || null, meta.pendidikanTerakhir || null, meta.statusKepegawaian || null]
     );
   } else if (categoryId === 3) {
+    const nextId = await getNextId(conn, "inventory_items");
     await conn.query(
       `INSERT INTO inventory_items
-       (document_id, kode_barang, nama_barang, jumlah, tahun_pengadaan, kondisi, lokasi)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [docId, meta.kodeBarang || null, meta.namaBarang || null, meta.jumlah || null,
+       (id, document_id, kode_barang, nama_barang, jumlah, tahun_pengadaan, kondisi, lokasi)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [nextId, docId, meta.kodeBarang || null, meta.namaBarang || null, meta.jumlah || null,
        meta.tahunPengadaan || null, meta.kondisi || null, meta.lokasi || null]
     );
   } else if (categoryId === 4) {
     if (typeId === 10) {
+      const nextId = await getNextId(conn, "incoming_letters");
       await conn.query(
         `INSERT INTO incoming_letters
-         (document_id, nomor_agenda, nomor_surat, tanggal_surat, tanggal_diterima, pengirim, perihal)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [docId, meta.nomorAgenda || null, meta.nomorSurat || null,
+         (id, document_id, nomor_agenda, nomor_surat, tanggal_surat, tanggal_diterima, pengirim, perihal)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [nextId, docId, meta.nomorAgenda || null, meta.nomorSurat || null,
          meta.tanggalSurat || null, meta.tanggalDiterima || null, meta.pengirim || null, meta.perihal || null]
       );
     } else if (typeId === 11) {
+      const nextId = await getNextId(conn, "outgoing_letters");
       await conn.query(
         `INSERT INTO outgoing_letters
-         (document_id, nomor_agenda, nomor_surat, tanggal_surat, tujuan, perihal, penandatangan)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [docId, meta.nomorAgenda || null, meta.nomorSurat || null,
+         (id, document_id, nomor_agenda, nomor_surat, tanggal_surat, tujuan, perihal, penandatangan)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [nextId, docId, meta.nomorAgenda || null, meta.nomorSurat || null,
          meta.tanggalSurat || null, meta.tujuan || null, meta.perihal || null, meta.penandatangan || null]
       );
     } else if (typeId === 12) {
+      const nextId = await getNextId(conn, "sk_records");
       await conn.query(
         `INSERT INTO sk_records
-         (document_id, nomor_sk, tanggal_sk, tentang, penandatangan)
-         VALUES (?, ?, ?, ?, ?)`,
-        [docId, meta.nomorSK || null, meta.tanggalSK || null, meta.tentang || null, meta.penandatangan || null]
+         (id, document_id, nomor_sk, tanggal_sk, tentang, penandatangan)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [nextId, docId, meta.nomorSK || null, meta.tanggalSK || null, meta.tentang || null, meta.penandatangan || null]
       );
     }
   }
