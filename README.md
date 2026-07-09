@@ -12,7 +12,7 @@ Sesuai dokumen *Product Development & Operational Environment*:
 | Framework        | **Express.js 4**                                    |
 | Upload handler   | **Multer** (`multipart/form-data`, memory storage)  |
 | Database         | **MySQL-compatible** (lokal: XAMPP / phpMyAdmin · produksi: **TiDB Cloud**) |
-| Cloud Storage    | **Firebase Storage** (`firebase-admin`) — hanya untuk file fisik, metadata tetap di TiDB/MySQL |
+| Cloud Storage    | **Supabase Storage** (`@supabase/supabase-js`) — hanya untuk file fisik, metadata tetap di TiDB/MySQL |
 | Auth             | **JWT** + **bcrypt** (hash password cost 10)        |
 | Validasi         | **zod**                                             |
 | Security         | helmet, cors, express-rate-limit                    |
@@ -28,7 +28,7 @@ backend/
 ├── config/
 │   └── db.js              # MySQL/TiDB connection pool (mysql2/promise)
 ├── services/
-│   └── firebaseStorage.js # uploadFile, getFileUrl, downloadFileBuffer, deleteFile, checkFileExists ke Firebase Storage
+│   └── supabaseStorage.js # uploadFile, getFileUrl, downloadFileBuffer, deleteFile, checkFileExists ke Supabase Storage
 ├── middleware/
 │   ├── auth.js            # JWT verify + signToken
 │   ├── rbac.js            # requirePermission(key) / requireRole(...)
@@ -90,14 +90,14 @@ npm run dev
 | ----------------- | ------------------------------------ |
 | API server        | **Railway** (Node.js)                |
 | Database          | **TiDB Cloud** (MySQL-compatible)    |
-| File storage      | **Firebase Storage** (bucket `sakura-dms-xxxxx.firebasestorage.app`) |
+| File storage      | **Supabase Storage** (bucket sesuai `SUPABASE_STORAGE_BUCKET`) |
 | Frontend          | **Netlify** (sudah ada)              |
 
 Set environment variable di Railway mengikuti `.env.example`,
 khususnya:
 
 - `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_SSL=true`
-- `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_STORAGE_BUCKET`
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`
 - `JWT_SECRET` (string acak panjang)
 - `CORS_ORIGIN=https://<nama-app>.netlify.app`
 
@@ -109,7 +109,7 @@ Base URL: `/api`
 
 ### Auth (`/api/auth`)
 | Method | Path                | Deskripsi                                |
-| ------ | ------------------- | ---------------------------------------- |
+| ------ | ------------------- | ----------------------------------------- |
 | POST   | `/register`         | Daftar baru → status `menunggu_approval` |
 | POST   | `/login`            | Login → return JWT                       |
 | GET    | `/me`               | Profil user dari token                   |
@@ -128,13 +128,13 @@ Base URL: `/api`
   ```
   Backend:
   1. Multer parse file → buffer
-  2. Upload buffer ke Firebase Storage → dapat `file_blob_name` (path) + `file_url`
+  2. Upload buffer ke Supabase Storage → dapat `file_blob_name` (path) + `file_url`
   3. Generate nomor dokumen `PREFIX/YYYY/NNN` (transactional, baris counter dikunci `FOR UPDATE`)
   4. Insert ke `documents` (TiDB/MySQL) + tabel metadata sesuai kategori
   5. Tulis audit trail + notifikasi ke approver
 - `POST /:id/approve` · `POST /:id/reject`
 - `PATCH /:id`
-- `DELETE /:id` (soft delete) · `POST /:id/restore` (validasi file masih ada di Firebase Storage sebelum dipulihkan) · `DELETE /:id/permanent` (hapus file di Firebase Storage juga)
+- `DELETE /:id` (soft delete) · `POST /:id/restore` (validasi file masih ada di Supabase Storage sebelum dipulihkan) · `DELETE /:id/permanent` (hapus file di Supabase Storage juga)
 
 ### Folders, Categories, Notifications, Audit, Roles
 Lihat masing-masing file di `routes/`.
@@ -150,7 +150,7 @@ Lihat `database/schema.sql`. Ringkasan tabel:
 3. `categories`, `document_types` — master data sesuai mockData frontend
 4. `folders` — hierarkis (`parent_id`), mendukung folder kustom (`is_custom = 1`)
 5. `document_counters` — generator nomor dokumen per (prefix, tahun)
-6. `documents` — entitas utama, simpan `file_url` (URL Firebase Storage) + `file_blob_name` (path di bucket, dipakai untuk get/download/delete)
+6. `documents` — entitas utama, simpan `file_url` (signed URL Supabase Storage) + `file_blob_name` (path di bucket, dipakai untuk get/download/delete)
 7. **Metadata per kategori** (one-to-one ke `documents`):
    - `student_records`     → Data Siswa
    - `teacher_records`     → Data Guru
@@ -219,7 +219,7 @@ await api("/documents", { method: "POST", body: fd, isForm: true });
 - ✅ RBAC dinamis: setiap endpoint penting di-gate via `requirePermission(...)`
 - ✅ SSL ke TiDB Cloud via `DB_SSL=true`
 - ✅ HTTPS handled by Railway / Netlify
-- ✅ Firebase Storage Rules menolak semua akses langsung dari client (`allow read/write: if false`) — file hanya bisa diakses lewat backend (Admin SDK) atau URL bertoken yang dikeluarkan backend
+- ✅ Supabase Storage bucket bersifat private — file hanya bisa diakses lewat backend (service_role key) atau signed URL sementara yang dikeluarkan backend
 
 ---
 
@@ -230,3 +230,80 @@ Gunakan **Postman**. Collection sederhana:
 1. `POST /api/auth/login` → simpan `token`
 2. Set header global `Authorization: Bearer {{token}}`
 3. Tes `GET /api/documents`, `POST /api/documents` (form-data), dst.
+
+---
+
+## Setup Supabase Storage — Step by Step
+
+Panduan ini menjelaskan cara mendapatkan 3 environment variable berikut:
+
+```env
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_STORAGE_BUCKET=
+```
+
+### 1. Buat akun & project Supabase
+1. Buka **https://supabase.com** → **Start your project** → login/sign up (bisa pakai GitHub).
+2. Di dashboard, klik **New Project**.
+3. Isi form: Organization, Name (mis. `sakura-dms`), Database Password (simpan baik-baik), Region (mis. Singapore), Plan (Free cukup untuk development).
+4. Klik **Create new project**, tunggu ± 1–2 menit sampai provisioning selesai.
+
+### 2. Ambil `SUPABASE_URL`
+1. Buka **Project Settings** (ikon gear) → tab **API**.
+2. Cari **Project URL**, bentuknya:
+   ```
+   https://xxxxxxxxxxxxx.supabase.co
+   ```
+3. Copy persis → itu nilai `SUPABASE_URL`.
+
+### 3. Ambil `SUPABASE_SERVICE_ROLE_KEY`
+Di **Project Settings → API Keys**, ada dua bagian:
+
+| Bagian | Format key | Boleh dipakai di backend? |
+|---|---|---|
+| **Publishable key** | `sb_publishable_...` | ❌ Tidak — ini setara `anon key`, aman untuk browser/client, dibatasi RLS |
+| **Secret keys** | `sb_secret_...` | ✅ Ya — ini setara `service_role key`, akses penuh, khusus server |
+
+Langkah:
+1. Scroll ke bagian **Secret keys**.
+2. Klik ikon mata 👁️ pada key `default` untuk reveal nilainya.
+3. Klik ikon copy di sebelahnya.
+4. Itu nilai `SUPABASE_SERVICE_ROLE_KEY`.
+
+⚠️ **Penting:**
+- Key ini setara admin (bypass Row Level Security). **Jangan** commit ke Git, taruh di frontend, atau expose ke browser.
+- Simpan hanya di environment variable backend (`.env` lokal yang di-gitignore, atau Railway Variables).
+
+### 4. Buat Storage Bucket & ambil `SUPABASE_STORAGE_BUCKET`
+1. Sidebar kiri → menu **Storage**.
+2. Klik **New bucket**.
+3. Isi **Name** (mis. `sakura-documents`), biarkan **Public bucket TIDAK dicentang** (private) — karena backend memakai `createSignedUrl` untuk URL sementara.
+4. Klik **Create bucket**.
+5. Nama bucket itu nilai `SUPABASE_STORAGE_BUCKET`.
+
+### 5. Isi ke `.env` backend
+```env
+SUPABASE_URL=https://xxxxxxxxxxxxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=sb_secret_xxxxxxxxxxxxxxxxxxxxxxxx
+SUPABASE_STORAGE_BUCKET=sakura-documents
+```
+
+### 6. Uji koneksi lokal
+```bash
+cd sakura-backend_draft
+npm install
+npm run dev
+```
+Log startup harus menampilkan:
+```
+Supabase Storage OK — bucket: sakura-documents — Bucket OK
+```
+Atau cek `GET http://localhost:5000/api/health` → field `supabaseStorage.ok` harus `true`.
+
+### 7. Set env var yang sama di Railway (produksi)
+1. Buka project backend di dashboard **Railway** → tab **Variables**.
+2. Tambahkan 3 variabel yang sama persis dengan nilai dari Supabase.
+3. Redeploy service agar env var baru terbaca.
+
+Setelah langkah ini, upload/delete/signed-URL dokumen sudah sepenuhnya berjalan lewat Supabase Storage, baik di lokal maupun di Railway.

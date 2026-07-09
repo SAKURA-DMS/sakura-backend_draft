@@ -18,7 +18,7 @@ const dashboardRoutes    = require("./routes/dashboard");
 const presenceRoutes     = require("./routes/presence");
 const chatbotRoutes      = require("./routes/chatbotRoutes"); // ← BARU
 const ocrRoutes          = require("./routes/ocr"); // ← BARU: OCR via Gemini Vision
-const { checkConnection } = require("./services/firebaseStorage");
+const { checkConnection } = require("./services/supabaseStorage");
 const { verifySmtp }      = require("./services/emailService");
 
 const app = express();
@@ -43,7 +43,7 @@ app.get("/api/health", (_req, res) =>
     status:         "ok",
     service:        "sakura-dms-backend",
     time:           new Date().toISOString(),
-    firebaseStorage: storageStatus,
+    supabaseStorage: storageStatus,
   })
 );
 
@@ -113,16 +113,16 @@ app.listen(PORT, async () => {
   // SMTP health check (non-fatal)
   await verifySmtp();
 
-  // Firebase Storage health check (non-fatal)
+  // Supabase Storage health check (non-fatal)
   try {
     storageStatus = await checkConnection();
     if (storageStatus.ok) {
-      console.log(`Firebase Storage OK — bucket: ${storageStatus.bucket} — ${storageStatus.message}`);
+      console.log(`Supabase Storage OK — bucket: ${storageStatus.bucket} — ${storageStatus.message}`);
     } else {
-      console.warn(`Firebase Storage WARNING: ${storageStatus.message}`);
+      console.warn(`Supabase Storage WARNING: ${storageStatus.message}`);
     }
   } catch (e) {
     storageStatus = { ok: false, message: e.message };
-    console.warn("Firebase Storage check failed:", e.message);
+    console.warn("Supabase Storage check failed:", e.message);
   }
 });
