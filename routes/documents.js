@@ -103,9 +103,15 @@ async function addAudit(
       previousHash
     );
 
+  // Sama seperti insert ke `documents`/`student_records`/dkk: kolom `id` di
+  // tabel `audit_trail` adalah `int NOT NULL` TANPA AUTO_INCREMENT, jadi ID
+  // harus dihitung manual sebelum INSERT.
+  const nextId = await getNextId(conn, "audit_trail");
+
   await conn.query(`
     INSERT INTO audit_trail
     (
+      id,
       document_id,
       approval_request_id,
       user_id,
@@ -115,8 +121,9 @@ async function addAudit(
       old_value,
       new_value
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
+    nextId,
     docId,
     approvalRequestId || null,
     userId,
@@ -126,6 +133,41 @@ async function addAudit(
     oldValue ? JSON.stringify(oldValue) : null,
     newValue ? JSON.stringify(newValue) : null
   ]);
+}
+
+// ── getNextId ──────────────────────────────────────────────────────────────────
+// Workaround untuk skema TiDB/MySQL saat ini: kolom `id` didefinisikan sebagai
+// `int NOT NULL` TANPA `AUTO_INCREMENT`, jadi ID berikutnya harus dihitung
+// manual sebelum INSERT, untuk SETIAP tabel yang butuh `id` (documents,
+// student_records, teacher_records, audit_trail, approval_requests,
+// notifications, dst). `FOR UPDATE` dipakai supaya aman dari race condition
+// selama masih di dalam transaksi yang sama (conn.beginTransaction()).
+// Catatan: fungsi ini juga dipanggil dengan `pool` (bukan `conn`) di beberapa
+// tempat yang berjalan di luar transaksi (mis. audit log "Melihat dokumen",
+// delete, restore) — itu tetap aman untuk kasus penggunaan tunggal seperti itu,
+// hanya saja tidak mendapat proteksi FOR UPDATE lintas-transaksi.
+async function getNextId(conn, table) {
+  const [[row]] = await conn.query(
+    `SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM \`${table}\` FOR UPDATE`
+  );
+  return row.nextId;
+}
+
+// ── insertNotifications ───────────────────────────────────────────────────────
+// Helper untuk insert 1 atau banyak baris ke `notifications` sekaligus, dengan
+// `id` dihitung manual secara berurutan (nextId, nextId+1, nextId+2, ...)
+// supaya tetap aman walau tabel `notifications` bisa menerima banyak baris
+// dalam satu aksi (mis. notifikasi ke semua approver saat upload).
+async function insertNotifications(conn, rows) {
+  if (!rows || !rows.length) return;
+  let nextId = await getNextId(conn, "notifications");
+  for (const row of rows) {
+    await conn.query(
+      `INSERT INTO notifications (id, user_id, message, type, document_id) VALUES (?, ?, ?, ?, ?)`,
+      [nextId, row.user_id, row.message, row.type, row.document_id]
+    );
+    nextId++;
+  }
 }
 
 // ── GET /api/documents — list dengan filter ───────────────────────────────────
@@ -255,11 +297,16 @@ router.get("/:id", async (req, res, next) => {
       }
     }
 
-    // Catat "Melihat dokumen" ke audit trail (non-blocking)
-    pool.query(
-      "INSERT INTO audit_trail (document_id, user_id, action) VALUES (?, ?, 'Melihat dokumen')",
-      [doc.id, req.user.id]
-    ).catch(() => {}); // jangan gagalkan response jika audit gagal
+    // Catat "Melihat dokumen" ke audit trail (non-blocking).
+    // Tetap harus hitung `id` manual (lihat catatan pada getNextId) sebelum
+    // insert, walau proses ini sendiri tidak menunggu (fire-and-forget).
+    (async () => {
+      const nextId = await getNextId(pool, "audit_trail");
+      await pool.query(
+        "INSERT INTO audit_trail (id, document_id, user_id, action) VALUES (?, ?, ?, 'Melihat dokumen')",
+        [nextId, doc.id, req.user.id]
+      );
+    })().catch(() => {}); // jangan gagalkan response jika audit gagal
 
     res.json({ document: doc, auditTrail: trail, metadata });
   } catch (e) { next(e); }
@@ -440,13 +487,16 @@ router.post(
           }
       );
 
-      // 5. Auto-create approval_request agar dokumen muncul di halaman persetujuan
-      const [aprIns] = await conn.query(
-        `INSERT INTO approval_requests (document_id, requester_id, status, requester_note, requested_at)
-         VALUES (?, ?, 'pending', NULL, NOW())`,
-        [docId, req.user.id]
+      // 5. Auto-create approval_request agar dokumen muncul di halaman persetujuan.
+      // Kolom `id` di `approval_requests` juga `int NOT NULL` tanpa AUTO_INCREMENT,
+      // jadi hitung manual (sama seperti documents/student_records/audit_trail),
+      // dan requestId diambil dari nextId ini — bukan dari insertId lagi.
+      const requestId = await getNextId(conn, "approval_requests");
+      await conn.query(
+        `INSERT INTO approval_requests (id, document_id, requester_id, status, requester_note, requested_at)
+         VALUES (?, ?, ?, 'pending', NULL, NOW())`,
+        [requestId, docId, req.user.id]
       );
-      const requestId = aprIns.insertId;
 
       // Audit: pengajuan persetujuan otomatis
       await addAudit(
@@ -461,13 +511,23 @@ router.post(
           }
       );
 
-      // 6. Notifikasi ke approver (Kepala Sekolah & Operator/TU aktif)
-      await conn.query(
-        `INSERT INTO notifications (user_id, message, type, document_id)
-         SELECT u.id, CONCAT('Dokumen baru menunggu persetujuan: ', ?), 'upload', ?
-         FROM users u
+      // 6. Notifikasi ke approver (Kepala Sekolah & Operator/TU aktif).
+      // Sebelumnya INSERT...SELECT langsung tanpa `id` — sekarang ambil dulu
+      // daftar approver-nya, baru insert satu-satu lewat insertNotifications()
+      // supaya tiap baris dapat `id` manual yang berurutan dan unik.
+      const [approvers] = await conn.query(
+        `SELECT u.id FROM users u
          WHERE u.role IN ('Kepala Sekolah', 'Operator/TU') AND u.status = 'active' AND u.id != ?`,
-        [judul, docId, req.user.id]
+        [req.user.id]
+      );
+      await insertNotifications(
+        conn,
+        approvers.map((u) => ({
+          user_id: u.id,
+          message: `Dokumen baru menunggu persetujuan: ${judul}`,
+          type: "upload",
+          document_id: docId,
+        }))
       );
 
       await conn.commit();
@@ -674,12 +734,22 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
         }
     );
 
-    await conn.query(
-      `INSERT INTO notifications (user_id, message, type, document_id)
-       SELECT uploaded_by, CONCAT('Dokumen "', judul, '" telah disetujui dan diarsipkan'), 'approval', id
-       FROM documents WHERE id = ?`,
+    // Sama seperti di upload: ambil dulu datanya, baru insert lewat
+    // insertNotifications() supaya `id` dihitung manual.
+    const [[approvedDoc]] = await conn.query(
+      "SELECT uploaded_by, judul FROM documents WHERE id = ?",
       [req.params.id]
     );
+    if (approvedDoc) {
+      await insertNotifications(conn, [
+        {
+          user_id: approvedDoc.uploaded_by,
+          message: `Dokumen "${approvedDoc.judul}" telah disetujui dan diarsipkan`,
+          type: "approval",
+          document_id: req.params.id,
+        },
+      ]);
+    }
 
     await conn.commit();
     res.json({ message: "Dokumen disetujui" });
@@ -726,12 +796,20 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
         }
     );
 
-    await conn.query(
-      `INSERT INTO notifications (user_id, message, type, document_id)
-       SELECT uploaded_by, CONCAT('Dokumen "', judul, '" telah ditolak'), 'rejection', id
-       FROM documents WHERE id = ?`,
+    const [[rejectedDoc]] = await conn.query(
+      "SELECT uploaded_by, judul FROM documents WHERE id = ?",
       [req.params.id]
     );
+    if (rejectedDoc) {
+      await insertNotifications(conn, [
+        {
+          user_id: rejectedDoc.uploaded_by,
+          message: `Dokumen "${rejectedDoc.judul}" telah ditolak`,
+          type: "rejection",
+          document_id: req.params.id,
+        },
+      ]);
+    }
 
     await conn.commit();
     res.json({ message: "Dokumen ditolak" });
@@ -811,20 +889,6 @@ router.delete("/:id/permanent", requirePermission("documents.delete"), async (re
     res.json({ message: "Dokumen dihapus permanen" });
   } catch (e) { next(e); }
 });
-
-// ── getNextId ──────────────────────────────────────────────────────────────────
-// Workaround yang sama seperti pada insert ke `documents`: karena kolom `id`
-// di skema TiDB/MySQL saat ini didefinisikan sebagai `int NOT NULL` TANPA
-// `AUTO_INCREMENT`, kita harus hitung ID berikutnya secara manual sebelum
-// INSERT, untuk SETIAP tabel metadata (student_records, teacher_records, dst).
-// `FOR UPDATE` dipakai supaya aman dari race condition ringan selama masih
-// di dalam transaksi yang sama (conn.beginTransaction()).
-async function getNextId(conn, table) {
-  const [[row]] = await conn.query(
-    `SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM \`${table}\` FOR UPDATE`
-  );
-  return row.nextId;
-}
 
 // ── insertMetadata ────────────────────────────────────────────────────────────
 async function insertMetadata(conn, docId, categoryId, typeId, meta) {
