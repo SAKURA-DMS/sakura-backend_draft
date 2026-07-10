@@ -9,7 +9,7 @@ const {
   getFileUrl,
   downloadFileBuffer,
   checkFileExists,
-} = require("../services/supabaseStorage");
+} = require("../services/firebaseStorage");
 const { generateAuditHash } = require("../utils/auditHash");
 
 const router = express.Router();
@@ -103,15 +103,9 @@ async function addAudit(
       previousHash
     );
 
-  // Sama seperti insert ke `documents`/`student_records`/dkk: kolom `id` di
-  // tabel `audit_trail` adalah `int NOT NULL` TANPA AUTO_INCREMENT, jadi ID
-  // harus dihitung manual sebelum INSERT.
-  const nextId = await getNextId(conn, "audit_trail");
-
   await conn.query(`
     INSERT INTO audit_trail
     (
-      id,
       document_id,
       approval_request_id,
       user_id,
@@ -121,9 +115,8 @@ async function addAudit(
       old_value,
       new_value
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `, [
-    nextId,
     docId,
     approvalRequestId || null,
     userId,
@@ -133,41 +126,6 @@ async function addAudit(
     oldValue ? JSON.stringify(oldValue) : null,
     newValue ? JSON.stringify(newValue) : null
   ]);
-}
-
-// ── getNextId ──────────────────────────────────────────────────────────────────
-// Workaround untuk skema TiDB/MySQL saat ini: kolom `id` didefinisikan sebagai
-// `int NOT NULL` TANPA `AUTO_INCREMENT`, jadi ID berikutnya harus dihitung
-// manual sebelum INSERT, untuk SETIAP tabel yang butuh `id` (documents,
-// student_records, teacher_records, audit_trail, approval_requests,
-// notifications, dst). `FOR UPDATE` dipakai supaya aman dari race condition
-// selama masih di dalam transaksi yang sama (conn.beginTransaction()).
-// Catatan: fungsi ini juga dipanggil dengan `pool` (bukan `conn`) di beberapa
-// tempat yang berjalan di luar transaksi (mis. audit log "Melihat dokumen",
-// delete, restore) — itu tetap aman untuk kasus penggunaan tunggal seperti itu,
-// hanya saja tidak mendapat proteksi FOR UPDATE lintas-transaksi.
-async function getNextId(conn, table) {
-  const [[row]] = await conn.query(
-    `SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM \`${table}\` FOR UPDATE`
-  );
-  return row.nextId;
-}
-
-// ── insertNotifications ───────────────────────────────────────────────────────
-// Helper untuk insert 1 atau banyak baris ke `notifications` sekaligus, dengan
-// `id` dihitung manual secara berurutan (nextId, nextId+1, nextId+2, ...)
-// supaya tetap aman walau tabel `notifications` bisa menerima banyak baris
-// dalam satu aksi (mis. notifikasi ke semua approver saat upload).
-async function insertNotifications(conn, rows) {
-  if (!rows || !rows.length) return;
-  let nextId = await getNextId(conn, "notifications");
-  for (const row of rows) {
-    await conn.query(
-      `INSERT INTO notifications (id, user_id, message, type, document_id) VALUES (?, ?, ?, ?, ?)`,
-      [nextId, row.user_id, row.message, row.type, row.document_id]
-    );
-    nextId++;
-  }
 }
 
 // ── GET /api/documents — list dengan filter ───────────────────────────────────
@@ -262,57 +220,45 @@ router.get("/:id", async (req, res, next) => {
     );
     if (!doc) return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (req.user.role === "Guru" && doc.uploaded_by !== req.user.id) {
-      return res.status(403).json({ error: "Anda tidak memiliki akses ke dokumen ini" });
+      return res.status(403).json({ error: "Akses ditolak" });
     }
 
     const [trail] = await pool.query(
-      `SELECT at.*, u.nama AS user_nama
-       FROM audit_trail at
-       LEFT JOIN users u ON u.id = at.user_id
-       WHERE at.document_id = ?
-       ORDER BY at.id ASC`,
+      `SELECT a.*, u.nama, u.role, u.avatar
+       FROM audit_trail a LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.document_id = ? ORDER BY a.created_at ASC`,
       [req.params.id]
     );
 
+    // Metadata per kategori
     let metadata = null;
-    if (Number(doc.category_id) === 1) {
-      const [[m]] = await pool.query("SELECT * FROM student_records WHERE document_id = ?", [doc.id]);
+    const metaTableByCategory = { 1: "student_records", 2: "teacher_records", 3: "inventory_items" };
+    if (metaTableByCategory[doc.category_id]) {
+      const [[m]] = await pool.query(
+        `SELECT * FROM ${metaTableByCategory[doc.category_id]} WHERE document_id = ?`,
+        [doc.id]
+      );
       metadata = m || null;
-    } else if (Number(doc.category_id) === 2) {
-      const [[m]] = await pool.query("SELECT * FROM teacher_records WHERE document_id = ?", [doc.id]);
-      metadata = m || null;
-    } else if (Number(doc.category_id) === 3) {
-      const [[m]] = await pool.query("SELECT * FROM inventory_items WHERE document_id = ?", [doc.id]);
-      metadata = m || null;
-    } else if (Number(doc.category_id) === 4) {
-      if (Number(doc.type_id) === 10) {
-        const [[m]] = await pool.query("SELECT * FROM incoming_letters WHERE document_id = ?", [doc.id]);
-        metadata = m || null;
-      } else if (Number(doc.type_id) === 11) {
-        const [[m]] = await pool.query("SELECT * FROM outgoing_letters WHERE document_id = ?", [doc.id]);
-        metadata = m || null;
-      } else if (Number(doc.type_id) === 12) {
-        const [[m]] = await pool.query("SELECT * FROM sk_records WHERE document_id = ?", [doc.id]);
+    } else if (doc.category_id === 4) {
+      const metaTableByType = { 10: "incoming_letters", 11: "outgoing_letters", 12: "sk_records" };
+      const tbl = metaTableByType[doc.type_id];
+      if (tbl) {
+        const [[m]] = await pool.query(`SELECT * FROM ${tbl} WHERE document_id = ?`, [doc.id]);
         metadata = m || null;
       }
     }
 
-    // Catat "Melihat dokumen" ke audit trail (non-blocking).
-    // Tetap harus hitung `id` manual (lihat catatan pada getNextId) sebelum
-    // insert, walau proses ini sendiri tidak menunggu (fire-and-forget).
-    (async () => {
-      const nextId = await getNextId(pool, "audit_trail");
-      await pool.query(
-        "INSERT INTO audit_trail (id, document_id, user_id, action) VALUES (?, ?, ?, 'Melihat dokumen')",
-        [nextId, doc.id, req.user.id]
-      );
-    })().catch(() => {}); // jangan gagalkan response jika audit gagal
+    // Catat "Melihat dokumen" ke audit trail (non-blocking)
+    pool.query(
+      "INSERT INTO audit_trail (document_id, user_id, action) VALUES (?, ?, 'Melihat dokumen')",
+      [doc.id, req.user.id]
+    ).catch(() => {}); // jangan gagalkan response jika audit gagal
 
     res.json({ document: doc, auditTrail: trail, metadata });
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/download — URL Supabase Storage bertoken ───────────
+// ── GET /api/documents/:id/download — URL Firebase Storage bertoken ───────────
 router.get("/:id/download", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -321,10 +267,10 @@ router.get("/:id/download", async (req, res, next) => {
     );
     if (!doc)          return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan untuk dokumen ini" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan untuk dokumen ini" });
 
     const expiryMinutes = Number(req.query.expiry) || 60;
-    const fileUrl = await getFileUrl(doc.file_blob_name, expiryMinutes * 60);
+    const fileUrl = await getFileUrl(doc.file_blob_name);
 
     // Audit: catat akses download
     await addAudit(pool, doc.id, req.user.id, `Mengunduh dokumen (link ${expiryMinutes} menit)`);
@@ -338,7 +284,7 @@ router.get("/:id/download", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/preview — URL Supabase Storage untuk preview (tanpa audit download) ──
+// ── GET /api/documents/:id/preview — URL Firebase Storage untuk preview (tanpa audit download) ──
 router.get("/:id/preview", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -347,7 +293,7 @@ router.get("/:id/preview", async (req, res, next) => {
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan untuk dokumen ini" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan untuk dokumen ini" });
 
     const fileUrl = await getFileUrl(doc.file_blob_name);
 
@@ -368,7 +314,7 @@ router.get("/:id/download-stream", async (req, res, next) => {
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan" });
 
     // Download buffer dari storage
     const buffer = await downloadFileBuffer(doc.file_blob_name);
@@ -411,7 +357,7 @@ router.post(
       return res.status(400).json({ error: "Field metadata bukan JSON valid" });
     }
 
-    // ── Upload ke Supabase Storage DULU (sebelum transaksi DB) ────────────────
+    // ── Upload ke Firebase Storage DULU (sebelum transaksi DB) ────────────────
     let blob;
     try {
       blob = await uploadFile(req.file, category_id);
@@ -419,9 +365,9 @@ router.post(
       if (storageErr.status) {
         return res.status(storageErr.status).json({ error: storageErr.message });
       }
-      console.error("[Upload] Supabase upload gagal:", storageErr.message);
+      console.error("[Upload] Firebase upload gagal:", storageErr.stack || storageErr.message);
       return res.status(502).json({
-        error: "Gagal mengunggah file ke Supabase Storage. Coba lagi beberapa saat.",
+        error: "Gagal mengunggah file ke Firebase Storage. Coba lagi beberapa saat.",
         detail: process.env.NODE_ENV !== "production" ? storageErr.message : undefined,
       });
     }
@@ -434,24 +380,15 @@ router.post(
       // 1. Generate nomor dokumen (dengan lock counter)
       const nomor = await generateDocumentNumber(conn, category_id, type_id);
 
-      // Generate ID manual untuk TiDB
-      const [[maxRow]] = await conn.query(
-        "SELECT COALESCE(MAX(id),0)+1 AS nextId FROM documents"
-      );
-
-      const nextId = maxRow.nextId;
-
-      // 2. Insert dokumen
+      // 2. Insert dokumen (id di-generate otomatis oleh AUTO_INCREMENT)
       const [ins] = await conn.query(
         `INSERT INTO documents
-          (id,
-            judul, nomor_dokumen, category_id, type_id, folder_id, tahun_ajaran,
+          (judul, nomor_dokumen, category_id, type_id, folder_id, tahun_ajaran,
             status, versi, uploaded_by,
             file_url, file_blob_name, file_size, mime_type, original_filename, catatan)
           VALUES
-          (?, ?, ?, ?, ?, ?, ?, 'Menunggu', 1, ?, ?, ?, ?, ?, ?, ?)`,
+          (?, ?, ?, ?, ?, ?, 'Menunggu', 1, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            nextId,
             judul,
             nomor,
             category_id,
@@ -467,7 +404,7 @@ router.post(
             catatan || null,
           ]
       );
-      const docId = nextId;
+      const docId = ins.insertId;
 
       // 3. Insert metadata per kategori
       await insertMetadata(conn, docId, Number(category_id), Number(type_id), parsedMeta);
@@ -487,16 +424,13 @@ router.post(
           }
       );
 
-      // 5. Auto-create approval_request agar dokumen muncul di halaman persetujuan.
-      // Kolom `id` di `approval_requests` juga `int NOT NULL` tanpa AUTO_INCREMENT,
-      // jadi hitung manual (sama seperti documents/student_records/audit_trail),
-      // dan requestId diambil dari nextId ini — bukan dari insertId lagi.
-      const requestId = await getNextId(conn, "approval_requests");
-      await conn.query(
-        `INSERT INTO approval_requests (id, document_id, requester_id, status, requester_note, requested_at)
-         VALUES (?, ?, ?, 'pending', NULL, NOW())`,
-        [requestId, docId, req.user.id]
+      // 5. Auto-create approval_request agar dokumen muncul di halaman persetujuan
+      const [aprIns] = await conn.query(
+        `INSERT INTO approval_requests (document_id, requester_id, status, requester_note, requested_at)
+         VALUES (?, ?, 'pending', NULL, NOW())`,
+        [docId, req.user.id]
       );
+      const requestId = aprIns.insertId;
 
       // Audit: pengajuan persetujuan otomatis
       await addAudit(
@@ -511,23 +445,13 @@ router.post(
           }
       );
 
-      // 6. Notifikasi ke approver (Kepala Sekolah & Operator/TU aktif).
-      // Sebelumnya INSERT...SELECT langsung tanpa `id` — sekarang ambil dulu
-      // daftar approver-nya, baru insert satu-satu lewat insertNotifications()
-      // supaya tiap baris dapat `id` manual yang berurutan dan unik.
-      const [approvers] = await conn.query(
-        `SELECT u.id FROM users u
+      // 6. Notifikasi ke approver (Kepala Sekolah & Operator/TU aktif)
+      await conn.query(
+        `INSERT INTO notifications (user_id, message, type, document_id)
+         SELECT u.id, CONCAT('Dokumen baru menunggu persetujuan: ', ?), 'upload', ?
+         FROM users u
          WHERE u.role IN ('Kepala Sekolah', 'Operator/TU') AND u.status = 'active' AND u.id != ?`,
-        [req.user.id]
-      );
-      await insertNotifications(
-        conn,
-        approvers.map((u) => ({
-          user_id: u.id,
-          message: `Dokumen baru menunggu persetujuan: ${judul}`,
-          type: "upload",
-          document_id: docId,
-        }))
+        [judul, docId, req.user.id]
       );
 
       await conn.commit();
@@ -542,7 +466,7 @@ router.post(
     } catch (dbErr) {
       await conn.rollback();
       // Rollback file yang sudah terupload agar tidak ada orphan
-      console.error("[Upload] DB error setelah Supabase upload — rolling back file:", blob?.blobName);
+      console.error("[Upload] DB error setelah Firebase upload — rolling back file:", blob?.blobName);
       if (blob?.blobName) {
         await deleteFile(blob.blobName).catch((e) =>
           console.warn("[Upload] Gagal hapus orphan file:", e.message)
@@ -571,7 +495,7 @@ router.patch(
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
 
-    // Upload file baru ke Supabase Storage
+    // Upload file baru ke Firebase Storage
     let newBlob;
     try {
       newBlob = await uploadFile(req.file, doc.category_id);
@@ -579,7 +503,7 @@ router.patch(
       if (storageErr.status) {
         return res.status(storageErr.status).json({ error: storageErr.message });
       }
-      return res.status(502).json({ error: "Gagal mengunggah file ke Supabase Storage.", detail: storageErr.message });
+      return res.status(502).json({ error: "Gagal mengunggah file ke Firebase Storage.", detail: storageErr.message });
     }
 
     const conn = await pool.getConnection();
@@ -626,7 +550,7 @@ router.patch(
       res.json({ message: "File berhasil diganti", versi: newVersi, file_url: newBlob.url });
     } catch (dbErr) {
       await conn.rollback();
-      // Rollback file baru yang sudah terupload
+      // Rollback file baru
       if (newBlob?.blobName) await deleteFile(newBlob.blobName).catch(() => {});
       next(dbErr);
     } finally {
@@ -635,55 +559,61 @@ router.patch(
   }
 );
 
-// ── PATCH /api/documents/:id — update metadata umum ────────────────────────────
+// ── PATCH /api/documents/:id — edit metadata dasar ───────────────────────────
 router.patch("/:id", requirePermission("documents.edit"), async (req, res, next) => {
   const conn = await pool.getConnection();
+
+  const [[oldDoc]] = await conn.query(
+    `SELECT
+      judul,
+      catatan,
+      folder_id,
+      tahun_ajaran
+    FROM documents
+    WHERE id=?`,
+    [req.params.id]
+  );
+
   try {
-    await conn.beginTransaction();
-
-    const [[doc]] = await conn.query("SELECT * FROM documents WHERE id = ?", [req.params.id]);
-    if (!doc) { await conn.rollback(); return res.status(404).json({ error: "Dokumen tidak ditemukan" }); }
-    if (doc.deleted_at) { await conn.rollback(); return res.status(410).json({ error: "Dokumen sudah dihapus" }); }
-
-    const fields = ["judul", "folder_id", "tahun_ajaran", "catatan"];
-    const updates = [];
-    const params = [];
-    const oldValue = {};
-    const newValue = {};
-
-    for (const f of fields) {
-      if (req.body[f] !== undefined) {
-        updates.push(`${f} = ?`);
-        params.push(req.body[f] || null);
-        oldValue[f] = doc[f];
-        newValue[f] = req.body[f];
-      }
-    }
-
-    if (updates.length === 0) {
-      await conn.rollback();
-      return res.status(400).json({ error: "Tidak ada field yang diupdate" });
-    }
-
-    params.push(req.params.id);
-    await conn.query(`UPDATE documents SET ${updates.join(", ")}, updated_at = NOW() WHERE id = ?`, params);
-
-    await addAudit(conn, req.params.id, req.user.id, "Mengubah metadata dokumen", null, oldValue, newValue);
-
-    await conn.commit();
-    res.json({ message: "Dokumen berhasil diperbarui" });
-  } catch (e) { await conn.rollback(); next(e); } finally { conn.release(); }
+    const { judul, catatan, folder_id, tahun_ajaran } = req.body;
+    const [r] = await conn.query(
+      `UPDATE documents SET
+         judul        = COALESCE(?, judul),
+         catatan      = COALESCE(?, catatan),
+         folder_id    = COALESCE(?, folder_id),
+         tahun_ajaran = COALESCE(?, tahun_ajaran),
+         updated_at   = NOW()
+       WHERE id = ? AND deleted_at IS NULL`,
+      [judul || null, catatan || null, folder_id || null, tahun_ajaran || null, req.params.id]
+    );
+    if (!r.affectedRows) return res.status(404).json({ error: "Dokumen tidak ditemukan atau sudah dihapus" });
+    await addAudit(
+        conn,
+        req.params.id,
+        req.user.id,
+        "Mengedit metadata dokumen",
+        null,
+        oldDoc,
+        {
+          judul: judul !== undefined ? judul : oldDoc.judul,
+          catatan: catatan !== undefined ? catatan : oldDoc.catatan,
+          folder_id: folder_id !== undefined ? folder_id : oldDoc.folder_id,
+          tahun_ajaran: tahun_ajaran !== undefined ? tahun_ajaran : oldDoc.tahun_ajaran
+        }
+    );
+    res.json({ message: "Dokumen diperbarui" });
+  } catch (e) { next(e); } finally { conn.release(); }
 });
 
-// ── POST /api/documents/:id/approve ─────────────────────────────────────────
+// ── POST /api/documents/:id/approve ──────────────────────────────────────────
 router.post("/:id/approve", requirePermission("documents.approve"), async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    const { comment } = req.body;
+    const { comment = "" } = req.body || {};
 
     const [r] = await conn.query(
-      "UPDATE documents SET status='Disetujui', updated_at=NOW() WHERE id=? AND status='Menunggu'",
+      "UPDATE documents SET status='Diarsipkan', updated_at=NOW() WHERE id=? AND status='Menunggu'",
       [req.params.id]
     );
     if (!r.affectedRows) {
@@ -697,12 +627,6 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
          SET status='approved', approver_id=?, approver_note=?, decided_at=NOW()
        WHERE document_id=? AND status='pending'`,
       [req.user.id, comment || null, req.params.id]
-    );
-
-    // Auto-arsipkan setelah disetujui
-    await conn.query(
-      "UPDATE documents SET status='Diarsipkan' WHERE id=?",
-      [req.params.id]
     );
 
     await addAudit(
@@ -734,22 +658,12 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
         }
     );
 
-    // Sama seperti di upload: ambil dulu datanya, baru insert lewat
-    // insertNotifications() supaya `id` dihitung manual.
-    const [[approvedDoc]] = await conn.query(
-      "SELECT uploaded_by, judul FROM documents WHERE id = ?",
+    await conn.query(
+      `INSERT INTO notifications (user_id, message, type, document_id)
+       SELECT uploaded_by, CONCAT('Dokumen "', judul, '" telah disetujui dan diarsipkan'), 'approval', id
+       FROM documents WHERE id = ?`,
       [req.params.id]
     );
-    if (approvedDoc) {
-      await insertNotifications(conn, [
-        {
-          user_id: approvedDoc.uploaded_by,
-          message: `Dokumen "${approvedDoc.judul}" telah disetujui dan diarsipkan`,
-          type: "approval",
-          document_id: req.params.id,
-        },
-      ]);
-    }
 
     await conn.commit();
     res.json({ message: "Dokumen disetujui" });
@@ -796,20 +710,12 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
         }
     );
 
-    const [[rejectedDoc]] = await conn.query(
-      "SELECT uploaded_by, judul FROM documents WHERE id = ?",
+    await conn.query(
+      `INSERT INTO notifications (user_id, message, type, document_id)
+       SELECT uploaded_by, CONCAT('Dokumen "', judul, '" telah ditolak'), 'rejection', id
+       FROM documents WHERE id = ?`,
       [req.params.id]
     );
-    if (rejectedDoc) {
-      await insertNotifications(conn, [
-        {
-          user_id: rejectedDoc.uploaded_by,
-          message: `Dokumen "${rejectedDoc.judul}" telah ditolak`,
-          type: "rejection",
-          document_id: req.params.id,
-        },
-      ]);
-    }
 
     await conn.commit();
     res.json({ message: "Dokumen ditolak" });
@@ -850,13 +756,13 @@ router.post("/:id/restore", requirePermission("documents.delete"), async (req, r
     );
     if (!doc) return res.status(404).json({ error: "Dokumen tidak ditemukan" });
 
-    // Pastikan file fisik masih ada di Supabase Storage sebelum dipulihkan,
+    // Pastikan file fisik masih ada di Firebase Storage sebelum dipulihkan,
     // agar tidak ada dokumen "hidup" di DB tanpa file di storage.
     if (doc.file_blob_name) {
       const exists = await checkFileExists(doc.file_blob_name);
       if (!exists) {
         return res.status(409).json({
-          error: "File dokumen tidak ditemukan di Supabase Storage, tidak bisa dipulihkan",
+          error: "File dokumen tidak ditemukan di Firebase Storage, tidak bisa dipulihkan",
         });
       }
     }
@@ -895,60 +801,54 @@ async function insertMetadata(conn, docId, categoryId, typeId, meta) {
   if (!meta || typeof meta !== "object") return;
 
   if (categoryId === 1) {
-    const nextId = await getNextId(conn, "student_records");
     await conn.query(
       `INSERT INTO student_records
-       (id, document_id, nama_siswa, nis, nisn, kelas, tahun_ajaran,
+       (document_id, nama_siswa, nis, nisn, kelas, tahun_ajaran,
         tempat_lahir, tanggal_lahir, jenis_kelamin, nama_orang_tua, no_hp_orang_tua)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [nextId, docId, meta.namaSiswa || null, meta.nis || null, meta.nisn || null, meta.kelas || null,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [docId, meta.namaSiswa || null, meta.nis || null, meta.nisn || null, meta.kelas || null,
        meta.tahunAjaran || null, meta.tempatLahir || null, meta.tanggalLahir || null,
        meta.jenisKelamin || null, meta.namaOrangTua || null, meta.noHpOrangTua || null]
     );
   } else if (categoryId === 2) {
-    const nextId = await getNextId(conn, "teacher_records");
     await conn.query(
       `INSERT INTO teacher_records
-       (id, document_id, nama_guru, nip, nuptk, mata_pelajaran, pendidikan_terakhir, status_kepegawaian)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [nextId, docId, meta.namaGuru || null, meta.nip || null, meta.nuptk || null,
+       (document_id, nama_guru, nip, nuptk, mata_pelajaran, pendidikan_terakhir, status_kepegawaian)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [docId, meta.namaGuru || null, meta.nip || null, meta.nuptk || null,
        meta.mataPelajaran || null, meta.pendidikanTerakhir || null, meta.statusKepegawaian || null]
     );
   } else if (categoryId === 3) {
-    const nextId = await getNextId(conn, "inventory_items");
     await conn.query(
       `INSERT INTO inventory_items
-       (id, document_id, kode_barang, nama_barang, jumlah, tahun_pengadaan, kondisi, lokasi)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [nextId, docId, meta.kodeBarang || null, meta.namaBarang || null, meta.jumlah || null,
+       (document_id, kode_barang, nama_barang, jumlah, tahun_pengadaan, kondisi, lokasi)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [docId, meta.kodeBarang || null, meta.namaBarang || null, meta.jumlah || null,
        meta.tahunPengadaan || null, meta.kondisi || null, meta.lokasi || null]
     );
   } else if (categoryId === 4) {
     if (typeId === 10) {
-      const nextId = await getNextId(conn, "incoming_letters");
       await conn.query(
         `INSERT INTO incoming_letters
-         (id, document_id, nomor_agenda, nomor_surat, tanggal_surat, tanggal_diterima, pengirim, perihal)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [nextId, docId, meta.nomorAgenda || null, meta.nomorSurat || null,
+         (document_id, nomor_agenda, nomor_surat, tanggal_surat, tanggal_diterima, pengirim, perihal)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [docId, meta.nomorAgenda || null, meta.nomorSurat || null,
          meta.tanggalSurat || null, meta.tanggalDiterima || null, meta.pengirim || null, meta.perihal || null]
       );
     } else if (typeId === 11) {
-      const nextId = await getNextId(conn, "outgoing_letters");
       await conn.query(
         `INSERT INTO outgoing_letters
-         (id, document_id, nomor_agenda, nomor_surat, tanggal_surat, tujuan, perihal, penandatangan)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [nextId, docId, meta.nomorAgenda || null, meta.nomorSurat || null,
+         (document_id, nomor_agenda, nomor_surat, tanggal_surat, tujuan, perihal, penandatangan)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [docId, meta.nomorAgenda || null, meta.nomorSurat || null,
          meta.tanggalSurat || null, meta.tujuan || null, meta.perihal || null, meta.penandatangan || null]
       );
     } else if (typeId === 12) {
-      const nextId = await getNextId(conn, "sk_records");
       await conn.query(
         `INSERT INTO sk_records
-         (id, document_id, nomor_sk, tanggal_sk, tentang, penandatangan)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [nextId, docId, meta.nomorSK || null, meta.tanggalSK || null, meta.tentang || null, meta.penandatangan || null]
+         (document_id, nomor_sk, tanggal_sk, tentang, penandatangan)
+         VALUES (?, ?, ?, ?, ?)`,
+        [docId, meta.nomorSK || null, meta.tanggalSK || null, meta.tentang || null, meta.penandatangan || null]
       );
     }
   }
