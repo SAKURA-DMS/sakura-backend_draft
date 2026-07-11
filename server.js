@@ -1,11 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// STANDAR ZONA WAKTU APLIKASI: Asia/Jakarta (WIB, UTC+7)
-// Diset SEBELUM modul lain di-load supaya seluruh operasi Date di sisi Node
-// (mis. penomoran dokumen per tahun, log, dsb.) konsisten dengan zona waktu
-// yang sama dipakai oleh koneksi database (lihat config/db.js). Ini melengkapi
-// perbaikan root-cause "jam timestamp salah" (upload/edit/audit trail/approval)
-// yang penyebab utamanya ada di session time_zone database, bukan di sini —
-// baris ini memastikan konsistensi menyeluruh, bukan sekadar tampilan.
 process.env.TZ = process.env.TZ || "Asia/Jakarta";
 
 require("dotenv").config();
@@ -34,25 +26,6 @@ const { verifySmtp }      = require("./services/emailService");
 
 const app = express();
 
-// ── Security & middleware ─────────────────────────────────────────────────────
-app.use(helmet());
-app.use(cors({
-  origin: process.env.CORS_ORIGIN?.split(",") || "*",
-  credentials: true,
-}));
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
-app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
-
-// ── [DEBUG TRACING] Middleware Global — request lifecycle logger ──────────────
-// TUJUAN: murni observabilitas untuk runtime debugging (mis. melacak request
-// yang timeout tanpa pernah dapat response). TIDAK mengubah alur/urutan
-// middleware yang sudah ada, TIDAK mengubah request/response apa pun — hanya
-// menempel log di titik "masuk" dan "selesai" (via event 'finish'/'close').
-//
-// Cara membaca log ini di Railway: setiap request diberi reqId pendek (8 char)
-// yang akan muncul lagi di log route/controller/DB terkait (lihat routes/auth.js),
-// sehingga satu request bisa ditelusuri end-to-end lewat reqId yang sama.
 app.use((req, res, next) => {
   const reqId = crypto.randomUUID().slice(0, 8);
   req._reqId = reqId;
@@ -62,7 +35,6 @@ app.use((req, res, next) => {
 
   const getDurationMs = () => Number(process.hrtime.bigint() - req._startTime) / 1e6;
 
-  // 'finish' = response benar-benar selesai dikirim ke client (headers + body flushed)
   res.on("finish", () => {
     const durationMs = getDurationMs().toFixed(1);
     console.log(
@@ -70,9 +42,6 @@ app.use((req, res, next) => {
     );
   });
 
-  // 'close' tanpa 'finish' sebelumnya = koneksi terputus (mis. client timeout,
-  // atau server mati di tengah jalan) SEBELUM response sempat terkirim.
-  // Inilah sinyal paling penting untuk kasus "request timeout tanpa response".
   res.on("close", () => {
     if (!res.writableEnded) {
       const durationMs = getDurationMs().toFixed(1);
