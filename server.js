@@ -27,22 +27,13 @@ const { verifySmtp }      = require("./services/emailService");
 const app = express();
 
 // ── Trust proxy ───────────────────────────────────────────────────────────────
-// Railway (dan platform PaaS lain) menempatkan app di belakang reverse proxy.
-// Tanpa ini, express-rate-limit akan melempar ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
-// dan req.ip/req.secure tidak akurat (mempengaruhi cookie secure, rate limit key, dll).
 app.set("trust proxy", 1);
 
 // ── Body parser ───────────────────────────────────────────────────────────────
-// PENTING: tanpa ini req.body selalu undefined untuk request JSON (mis. POST
-// /api/auth/login), sehingga setiap schema.parse(req.body) di routes/auth.js
-// selalu gagal dan mengembalikan HTTP 400 walau kredensial yang dikirim benar.
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-// Daftar origin yang diizinkan diambil dari CORS_ORIGIN (.env), bisa berisi
-// beberapa origin dipisah koma, contoh:
-// CORS_ORIGIN=https://sakuradms.netlify.app,http://localhost:5173
 const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
   .split(",")
   .map((o) => o.trim())
@@ -64,7 +55,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// Pastikan semua preflight OPTIONS di seluruh route ditangani oleh middleware cors di atas
 app.options("*", cors(corsOptions));
 
 app.use((req, res, next) => {
@@ -152,8 +142,6 @@ app.use((req, res) => res.status(404).json({ error: "Not Found", path: req.path 
 
 // ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, _next) => {
-  // [DEBUG TRACING] log lengkap termasuk stack trace + reqId (jika tersedia)
-  // supaya error apapun yang lolos ke sini bisa ditelusuri ke request asalnya.
   const reqId = req?._reqId || "-";
   console.error(`[REQ ${reqId}] ✖ GLOBAL ERROR HANDLER:`, err.message);
   console.error(`[REQ ${reqId}] Stack trace:`, err.stack);

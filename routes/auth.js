@@ -28,9 +28,8 @@ const registerSchema = z.object({
   role:       z.enum(["Guru", "Operator/TU", "Kepala Sekolah"]).optional().default("Guru"),
 });
 
-// Login bisa pakai email atau nama
 const loginSchema = z.object({
-  identifier: z.string().min(1), // email atau nama
+  identifier: z.string().min(1), 
   password:   z.string().min(1),
 });
 
@@ -48,9 +47,6 @@ router.post("/register", async (req, res, next) => {
 
     const hash = await bcrypt.hash(data.password, 10);
 
-    // users.id BUKAN AUTO_INCREMENT (skema TiDB tidak mengizinkan ALTER untuk itu),
-    // jadi id berikutnya dihitung manual. Dibungkus transaksi + FOR UPDATE supaya
-    // dua registrasi yang datang bersamaan tidak mendapat id yang sama.
     conn = await pool.getConnection();
     await conn.beginTransaction();
 
@@ -81,11 +77,8 @@ router.post("/register", async (req, res, next) => {
 });
 
 // ── POST /api/auth/login ──────────────────────────────────────────────────────
-// Mendukung login via email ATAU nama
 router.post(
   "/login",
-  // [DEBUG TRACING] middleware kecil khusus route ini — menandai titik
-  // "sebelum route handler dipanggil". Tidak mengubah req/res apapun.
   (req, res, next) => {
     const reqId = req._reqId || "-";
     console.log(`[REQ ${reqId}] [ROUTE] → POST /login — route handler dipanggil`);
@@ -399,9 +392,6 @@ router.post("/disable-2fa", authRequired, async (req, res, next) => {
 });
 
 // ── POST /api/auth/logout ─────────────────────────────────────────────────────
-// Menandai user offline di sisi server. Token JWT tetap tidak bisa "dicabut"
-// (stateless), tapi status online/offline-nya langsung diperbarui supaya
-// avatar user ini langsung tampil abu-abu (offline) di seluruh aplikasi.
 router.post("/logout", authRequired, async (req, res, next) => {
   try {
     await pool.query("UPDATE users SET is_online = 0 WHERE id = ?", [req.user.id]);
@@ -412,9 +402,6 @@ router.post("/logout", authRequired, async (req, res, next) => {
 });
 
 // ── GET /api/auth/me ──────────────────────────────────────────────────────────
-// Dipakai juga untuk restore session (saat reload halaman) — sekaligus
-// berfungsi sebagai heartbeat pertama, jadi user yang baru refresh halaman
-// langsung tampil online tanpa menunggu interval heartbeat berikutnya.
 router.get("/me", authRequired, async (req, res, next) => {
   try {
     await pool.query(
@@ -452,8 +439,6 @@ router.post("/change-password", authRequired, async (req, res, next) => {
     const ok = await bcrypt.compare(oldPassword, rows[0].password_hash);
     if (!ok) return res.status(400).json({ error: "Password lama salah" });
     const hash = await bcrypt.hash(newPassword, 10);
-    // Password berhasil diganti → hapus penanda "masih pakai password awal"
-    // supaya halaman wajib-ganti-password tidak muncul lagi di login berikutnya.
     await pool.query(
       "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
       [hash, req.user.id]
