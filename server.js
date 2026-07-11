@@ -26,7 +26,6 @@ const { verifySmtp }      = require("./services/emailService");
 
 const app = express();
 
-// ── Trust proxy ───────────────────────────────────────────────────────────────
 app.set("trust proxy", 1);
 
 // ── Body parser ───────────────────────────────────────────────────────────────
@@ -34,14 +33,14 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
+const DEFAULT_ALLOWED_ORIGINS = "https://sakuradms.com,https://www.sakuradms.com,https://sakuradms.netlify.app,http://localhost:5173";
+const allowedOrigins = (process.env.CORS_ORIGIN || DEFAULT_ALLOWED_ORIGINS)
   .split(",")
   .map((o) => o.trim())
   .filter(Boolean);
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Izinkan request tanpa origin (contoh: health check server-to-server, curl, Postman)
     if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
