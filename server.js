@@ -26,6 +26,34 @@ const { verifySmtp }      = require("./services/emailService");
 
 const app = express();
 
+// ── CORS ──────────────────────────────────────────────────────────────────────
+// Daftar origin yang diizinkan diambil dari CORS_ORIGIN (.env), bisa berisi
+// beberapa origin dipisah koma, contoh:
+// CORS_ORIGIN=https://sakuradms.netlify.app,http://localhost:5173
+const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Izinkan request tanpa origin (contoh: health check server-to-server, curl, Postman)
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS: origin ${origin} tidak diizinkan`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept"],
+  exposedHeaders: ["Content-Disposition"],
+  optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
+// Pastikan semua preflight OPTIONS di seluruh route ditangani oleh middleware cors di atas
+app.options("*", cors(corsOptions));
+
 app.use((req, res, next) => {
   const reqId = crypto.randomUUID().slice(0, 8);
   req._reqId = reqId;
