@@ -81,7 +81,6 @@ app.use("/api/audit",         auditRoutes);
 app.use("/api/roles",         roleRoutes);
 app.use("/api/approvals",     approvalRoutes);
 app.use("/api/dashboard",     dashboardRoutes);
-app.use("/api/chatbot",       chatbotRoutes);
 app.use("/api/presence",      presenceRoutes);
 app.use("/api/chatbot",       chatbotRoutes); // ← BARU
 app.use("/api/ocr",           ocrRoutes); // ← BARU: OCR via Gemini Vision

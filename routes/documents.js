@@ -9,7 +9,7 @@ const {
   getFileUrl,
   downloadFileBuffer,
   checkFileExists,
-} = require("../services/firebaseStorage");
+} = require("../services/supabaseStorage");
 const { generateAuditHash } = require("../utils/auditHash");
 
 const router = express.Router();
@@ -258,7 +258,7 @@ router.get("/:id", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/download — URL Firebase Storage bertoken ───────────
+// ── GET /api/documents/:id/download — URL Supabase Storage bertoken ───────────
 router.get("/:id/download", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -267,7 +267,7 @@ router.get("/:id/download", async (req, res, next) => {
     );
     if (!doc)          return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan untuk dokumen ini" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan untuk dokumen ini" });
 
     const expiryMinutes = Number(req.query.expiry) || 60;
     const fileUrl = await getFileUrl(doc.file_blob_name);
@@ -284,7 +284,7 @@ router.get("/:id/download", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/preview — URL Firebase Storage untuk preview (tanpa audit download) ──
+// ── GET /api/documents/:id/preview — URL Supabase Storage untuk preview (tanpa audit download) ──
 router.get("/:id/preview", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -293,7 +293,7 @@ router.get("/:id/preview", async (req, res, next) => {
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan untuk dokumen ini" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan untuk dokumen ini" });
 
     const fileUrl = await getFileUrl(doc.file_blob_name);
 
@@ -314,7 +314,7 @@ router.get("/:id/download-stream", async (req, res, next) => {
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
-    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Firebase tidak ditemukan" });
+    if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan" });
 
     // Download buffer dari storage
     const buffer = await downloadFileBuffer(doc.file_blob_name);
@@ -357,7 +357,7 @@ router.post(
       return res.status(400).json({ error: "Field metadata bukan JSON valid" });
     }
 
-    // ── Upload ke Firebase Storage DULU (sebelum transaksi DB) ────────────────
+    // ── Upload ke Supabase Storage DULU (sebelum transaksi DB) ────────────────
     let blob;
     try {
       blob = await uploadFile(req.file, category_id);
@@ -365,9 +365,9 @@ router.post(
       if (storageErr.status) {
         return res.status(storageErr.status).json({ error: storageErr.message });
       }
-      console.error("[Upload] Firebase upload gagal:", storageErr.stack || storageErr.message);
+      console.error("[Upload] Supabase upload gagal:", storageErr.stack || storageErr.message);
       return res.status(502).json({
-        error: "Gagal mengunggah file ke Firebase Storage. Coba lagi beberapa saat.",
+        error: "Gagal mengunggah file ke Supabase Storage. Coba lagi beberapa saat.",
         detail: process.env.NODE_ENV !== "production" ? storageErr.message : undefined,
       });
     }
@@ -466,7 +466,7 @@ router.post(
     } catch (dbErr) {
       await conn.rollback();
       // Rollback file yang sudah terupload agar tidak ada orphan
-      console.error("[Upload] DB error setelah Firebase upload — rolling back file:", blob?.blobName);
+      console.error("[Upload] DB error setelah Supabase upload — rolling back file:", blob?.blobName);
       if (blob?.blobName) {
         await deleteFile(blob.blobName).catch((e) =>
           console.warn("[Upload] Gagal hapus orphan file:", e.message)
@@ -495,7 +495,7 @@ router.patch(
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
 
-    // Upload file baru ke Firebase Storage
+    // Upload file baru ke Supabase Storage
     let newBlob;
     try {
       newBlob = await uploadFile(req.file, doc.category_id);
@@ -503,7 +503,7 @@ router.patch(
       if (storageErr.status) {
         return res.status(storageErr.status).json({ error: storageErr.message });
       }
-      return res.status(502).json({ error: "Gagal mengunggah file ke Firebase Storage.", detail: storageErr.message });
+      return res.status(502).json({ error: "Gagal mengunggah file ke Supabase Storage.", detail: storageErr.message });
     }
 
     const conn = await pool.getConnection();
@@ -756,13 +756,13 @@ router.post("/:id/restore", requirePermission("documents.delete"), async (req, r
     );
     if (!doc) return res.status(404).json({ error: "Dokumen tidak ditemukan" });
 
-    // Pastikan file fisik masih ada di Firebase Storage sebelum dipulihkan,
+    // Pastikan file fisik masih ada di Supabase Storage sebelum dipulihkan,
     // agar tidak ada dokumen "hidup" di DB tanpa file di storage.
     if (doc.file_blob_name) {
       const exists = await checkFileExists(doc.file_blob_name);
       if (!exists) {
         return res.status(409).json({
-          error: "File dokumen tidak ditemukan di Firebase Storage, tidak bisa dipulihkan",
+          error: "File dokumen tidak ditemukan di Supabase Storage, tidak bisa dipulihkan",
         });
       }
     }
