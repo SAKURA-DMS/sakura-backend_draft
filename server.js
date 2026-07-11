@@ -1,3 +1,5 @@
+process.env.TZ = process.env.TZ || "Asia/Jakarta";
+
 require("dotenv").config();
 const express   = require("express");
 const cors      = require("cors");
@@ -16,8 +18,8 @@ const roleRoutes         = require("./routes/roles");
 const approvalRoutes     = require("./routes/approvals");
 const dashboardRoutes    = require("./routes/dashboard");
 const presenceRoutes     = require("./routes/presence");
-const chatbotRoutes      = require("./routes/chatbotRoutes"); // ← BARU
-const ocrRoutes          = require("./routes/ocr"); // ← BARU: OCR via Gemini Vision
+const chatbotRoutes      = require("./routes/chatbotRoutes");
+const ocrRoutes          = require("./routes/ocr"); 
 const { checkConnection } = require("./services/supabaseStorage");
 const { verifySmtp }      = require("./services/emailService");
 

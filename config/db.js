@@ -1,5 +1,7 @@
 const mysql = require("mysql2/promise");
 
+const APP_TIMEZONE_OFFSET = "+07:00"; 
+
 const pool = mysql.createPool({
   host: process.env.DB_HOST || "127.0.0.1",
   port: Number(process.env.DB_PORT || 3306),
@@ -11,6 +13,13 @@ const pool = mysql.createPool({
   queueLimit: 0,
   ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: true } : undefined,
   dateStrings: true,
+  timezone: APP_TIMEZONE_OFFSET,
+});
+
+pool.on("connection", (connection) => {
+  connection.query(`SET time_zone = '${APP_TIMEZONE_OFFSET}'`).catch((err) => {
+    console.error("[DB] Gagal mengatur session time_zone:", err.message);
+  });
 });
 
 module.exports = pool;
