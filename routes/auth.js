@@ -73,7 +73,7 @@ router.post("/register", async (req, res, next) => {
     });
   } catch (e) {
     if (conn) await conn.rollback();
-    if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
+    if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
     next(e);
   } finally {
     if (conn) conn.release();
@@ -206,7 +206,7 @@ router.post(
     } catch (e) {
       console.error(`[REQ ${reqId}] [CONTROLLER:login] ✖ Exception tertangkap:`, e.message);
       console.error(`[REQ ${reqId}] [CONTROLLER:login] Stack trace lengkap:`, e.stack);
-      if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
+      if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
       next(e);
     }
   }
@@ -263,7 +263,7 @@ router.post("/verify-otp", otpLimiter, async (req, res, next) => {
       user: _publicUser(user),
     });
   } catch (e) {
-    if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
+    if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
     next(e);
   }
 });
@@ -322,7 +322,7 @@ router.post("/send-otp", otpLimiter, async (req, res, next) => {
       message: `OTP dikirim ke ${userEmail}. Berlaku ${OTP_EXPIRY_MINUTES} menit.`,
     });
   } catch (e) {
-    if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
+    if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
     next(e);
   }
 });
@@ -363,7 +363,7 @@ router.post("/enable-2fa", authRequired, otpLimiter, async (req, res, next) => {
 
     res.json({ message: "2FA berhasil diaktifkan.", is2faEnabled: true });
   } catch (e) {
-    if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
+    if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
     next(e);
   }
 });
@@ -393,7 +393,7 @@ router.post("/disable-2fa", authRequired, async (req, res, next) => {
 
     res.json({ message: "2FA berhasil dinonaktifkan.", is2faEnabled: false });
   } catch (e) {
-    if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
+    if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
     next(e);
   }
 });
@@ -460,7 +460,7 @@ router.post("/change-password", authRequired, async (req, res, next) => {
     );
     res.json({ message: "Password berhasil diubah", mustChangePassword: false });
   } catch (e) {
-    if (e.name === "ZodError") return res.status(400).json({ error: e.errors });
+    if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
     next(e);
   }
 });

@@ -26,6 +26,19 @@ const { verifySmtp }      = require("./services/emailService");
 
 const app = express();
 
+// ── Trust proxy ───────────────────────────────────────────────────────────────
+// Railway (dan platform PaaS lain) menempatkan app di belakang reverse proxy.
+// Tanpa ini, express-rate-limit akan melempar ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+// dan req.ip/req.secure tidak akurat (mempengaruhi cookie secure, rate limit key, dll).
+app.set("trust proxy", 1);
+
+// ── Body parser ───────────────────────────────────────────────────────────────
+// PENTING: tanpa ini req.body selalu undefined untuk request JSON (mis. POST
+// /api/auth/login), sehingga setiap schema.parse(req.body) di routes/auth.js
+// selalu gagal dan mengembalikan HTTP 400 walau kredensial yang dikirim benar.
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
+
 // ── CORS ──────────────────────────────────────────────────────────────────────
 // Daftar origin yang diizinkan diambil dari CORS_ORIGIN (.env), bisa berisi
 // beberapa origin dipisah koma, contoh:
