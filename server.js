@@ -1,3 +1,11 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// STANDAR ZONA WAKTU APLIKASI: Asia/Jakarta (WIB, UTC+7)
+// Diset SEBELUM modul lain di-load supaya seluruh operasi Date di sisi Node
+// (mis. penomoran dokumen per tahun, log, dsb.) konsisten dengan zona waktu
+// yang sama dipakai oleh koneksi database (lihat config/db.js). Ini melengkapi
+// perbaikan root-cause "jam timestamp salah" (upload/edit/audit trail/approval)
+// yang penyebab utamanya ada di session time_zone database, bukan di sini —
+// baris ini memastikan konsistensi menyeluruh, bukan sekadar tampilan.
 process.env.TZ = process.env.TZ || "Asia/Jakarta";
 
 require("dotenv").config();
@@ -6,6 +14,7 @@ const cors      = require("cors");
 const helmet    = require("helmet");
 const morgan    = require("morgan");
 const rateLimit = require("express-rate-limit");
+const crypto    = require("crypto");
 
 const authRoutes         = require("./routes/auth");
 const userRoutes         = require("./routes/users");
@@ -18,8 +27,8 @@ const roleRoutes         = require("./routes/roles");
 const approvalRoutes     = require("./routes/approvals");
 const dashboardRoutes    = require("./routes/dashboard");
 const presenceRoutes     = require("./routes/presence");
-const chatbotRoutes      = require("./routes/chatbotRoutes");
-const ocrRoutes          = require("./routes/ocr"); 
+const chatbotRoutes      = require("./routes/chatbotRoutes"); // ← BARU
+const ocrRoutes          = require("./routes/ocr"); // ← BARU: OCR via Gemini Vision
 const { checkConnection } = require("./services/supabaseStorage");
 const { verifySmtp }      = require("./services/emailService");
 
@@ -34,6 +43,47 @@ app.use(cors({
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+
+// ── [DEBUG TRACING] Middleware Global — request lifecycle logger ──────────────
+// TUJUAN: murni observabilitas untuk runtime debugging (mis. melacak request
+// yang timeout tanpa pernah dapat response). TIDAK mengubah alur/urutan
+// middleware yang sudah ada, TIDAK mengubah request/response apa pun — hanya
+// menempel log di titik "masuk" dan "selesai" (via event 'finish'/'close').
+//
+// Cara membaca log ini di Railway: setiap request diberi reqId pendek (8 char)
+// yang akan muncul lagi di log route/controller/DB terkait (lihat routes/auth.js),
+// sehingga satu request bisa ditelusuri end-to-end lewat reqId yang sama.
+app.use((req, res, next) => {
+  const reqId = crypto.randomUUID().slice(0, 8);
+  req._reqId = reqId;
+  req._startTime = process.hrtime.bigint();
+
+  console.log(`[REQ ${reqId}] ⇢ MIDDLEWARE-GLOBAL: Incoming ${req.method} ${req.originalUrl}`);
+
+  const getDurationMs = () => Number(process.hrtime.bigint() - req._startTime) / 1e6;
+
+  // 'finish' = response benar-benar selesai dikirim ke client (headers + body flushed)
+  res.on("finish", () => {
+    const durationMs = getDurationMs().toFixed(1);
+    console.log(
+      `[REQ ${reqId}] ⇠ RESPONSE SELESAI: ${req.method} ${req.originalUrl} status=${res.statusCode} duration=${durationMs}ms`
+    );
+  });
+
+  // 'close' tanpa 'finish' sebelumnya = koneksi terputus (mis. client timeout,
+  // atau server mati di tengah jalan) SEBELUM response sempat terkirim.
+  // Inilah sinyal paling penting untuk kasus "request timeout tanpa response".
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      const durationMs = getDurationMs().toFixed(1);
+      console.warn(
+        `[REQ ${reqId}] ⚠ KONEKSI TERPUTUS TANPA RESPONSE: ${req.method} ${req.originalUrl} setelah ${durationMs}ms (kemungkinan hang/timeout di controller atau database)`
+      );
+    }
+  });
+
+  next();
+});
 
 app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, max: 50, standardHeaders: true }));
 
@@ -91,8 +141,13 @@ app.use("/api/ocr",           ocrRoutes); // ← BARU: OCR via Gemini Vision
 app.use((req, res) => res.status(404).json({ error: "Not Found", path: req.path }));
 
 // ── Global error handler ──────────────────────────────────────────────────────
-app.use((err, _req, res, _next) => {
-  console.error("[ERROR]", err);
+app.use((err, req, res, _next) => {
+  // [DEBUG TRACING] log lengkap termasuk stack trace + reqId (jika tersedia)
+  // supaya error apapun yang lolos ke sini bisa ditelusuri ke request asalnya.
+  const reqId = req?._reqId || "-";
+  console.error(`[REQ ${reqId}] ✖ GLOBAL ERROR HANDLER:`, err.message);
+  console.error(`[REQ ${reqId}] Stack trace:`, err.stack);
+
   if (err.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({ error: `File terlalu besar. Maksimal ${process.env.MAX_UPLOAD_MB || 25} MB.` });
   }
