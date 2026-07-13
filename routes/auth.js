@@ -6,6 +6,7 @@ const pool         = require("../config/db");
 const { signToken, authRequired } = require("../middleware/auth");
 const { sendOtpEmail }            = require("../services/emailService");
 const { generateOtp, hashOtp, verifyOtp, getOtpExpiry, isOtpExpired, OTP_EXPIRY_MINUTES } = require("../utils/otp");
+const { logActivity } = require("../utils/auditLog");
 
 const router = express.Router();
 
@@ -77,133 +78,89 @@ router.post("/register", async (req, res, next) => {
 });
 
 // ── POST /api/auth/login ──────────────────────────────────────────────────────
-router.post(
-  "/login",
-  (req, res, next) => {
-    const reqId = req._reqId || "-";
-    console.log(`[REQ ${reqId}] [ROUTE] → POST /login — route handler dipanggil`);
-    next();
-  },
-  async (req, res, next) => {
-    const reqId = req._reqId || "-";
-    const dbg = (msg) => console.log(`[REQ ${reqId}] [CONTROLLER:login] ${msg}`);
+router.post("/login", async (req, res, next) => {
+  try {
+    const { identifier, password } = loginSchema.parse(req.body);
 
-    dbg("Fungsi controller mulai dieksekusi");
+    // Cari user berdasarkan email atau nama (case-insensitive untuk nama)
+    const [rows] = await pool.query(
+      "SELECT * FROM users WHERE email = ? OR LOWER(nama) = LOWER(?) LIMIT 1",
+      [identifier, identifier]
+    );
 
-    try {
-      const { identifier, password } = loginSchema.parse(req.body);
-      dbg(`Payload tervalidasi (identifier="${identifier}")`);
-
-      // Cari user berdasarkan email atau nama (case-insensitive untuk nama)
-      const loginQuerySql = "SELECT * FROM users WHERE email = ? OR LOWER(nama) = LOWER(?) LIMIT 1";
-      dbg(`Sebelum query database — SQL: ${loginQuerySql}`);
-      const dbStart = process.hrtime.bigint();
-      const [rows] = await pool.query(loginQuerySql, [identifier, identifier]);
-      const dbDurationMs = (Number(process.hrtime.bigint() - dbStart) / 1e6).toFixed(1);
-      dbg(`Sesudah query database — durasi=${dbDurationMs}ms, jumlah row=${rows.length}`);
-
-      if (!rows.length) {
-        dbg("User tidak ditemukan — sebelum res.json() (401)");
-        res.status(401).json({ error: "Identitas atau password salah" });
-        dbg("Sesudah res.json() (401 - user tidak ditemukan) dipanggil");
-        return;
-      }
-
-      const user = rows[0];
-
-      dbg("Sebelum verifikasi password (bcrypt.compare)");
-      const bcryptStart = process.hrtime.bigint();
-      const ok = await bcrypt.compare(password, user.password_hash);
-      const bcryptDurationMs = (Number(process.hrtime.bigint() - bcryptStart) / 1e6).toFixed(1);
-      dbg(`Sesudah verifikasi password — durasi=${bcryptDurationMs}ms, hasil=${ok}`);
-
-      if (!ok) {
-        dbg("Password salah — sebelum res.json() (401)");
-        res.status(401).json({ error: "Identitas atau password salah" });
-        dbg("Sesudah res.json() (401 - password salah) dipanggil");
-        return;
-      }
-
-      if (user.status === "menunggu_approval") {
-        dbg("Status akun: menunggu_approval — sebelum res.json() (403)");
-        res.status(403).json({ error: "Akun masih menunggu approval admin", status: "pending" });
-        dbg("Sesudah res.json() (403 - menunggu approval) dipanggil");
-        return;
-      }
-      if (user.status === "nonaktif") {
-        dbg("Status akun: nonaktif — sebelum res.json() (403)");
-        res.status(403).json({ error: "Akun dinonaktifkan" });
-        dbg("Sesudah res.json() (403 - nonaktif) dipanggil");
-        return;
-      }
-
-      // ── 2FA aktif: kirim OTP, tunda JWT ──────────────────────────────────────
-      if (user.is_2fa_enabled) {
-        dbg("2FA aktif untuk user ini — memulai alur OTP");
-        const otpPlain  = generateOtp();
-        const otpHash   = await hashOtp(otpPlain);
-        const expiresAt = getOtpExpiry();
-
-        const updateOtpSql = "UPDATE users SET otp_hash = ?, otp_expires_at = ?, otp_used = 0, otp_attempts = 0 WHERE id = ?";
-        dbg(`Sebelum query database (update OTP) — SQL: ${updateOtpSql}`);
-        const otpDbStart = process.hrtime.bigint();
-        await pool.query(updateOtpSql, [otpHash, expiresAt, user.id]);
-        const otpDbDurationMs = (Number(process.hrtime.bigint() - otpDbStart) / 1e6).toFixed(1);
-        dbg(`Sesudah query database (update OTP) — durasi=${otpDbDurationMs}ms`);
-
-        try {
-          dbg("Sebelum kirim email OTP");
-          await sendOtpEmail({ to: user.email, namaUser: user.nama, otpCode: otpPlain, expiryMin: OTP_EXPIRY_MINUTES });
-          dbg("Sesudah kirim email OTP — berhasil");
-        } catch (mailErr) {
-          console.error(`[REQ ${reqId}] [CONTROLLER:login] Gagal kirim OTP email:`, mailErr.message);
-          console.error(`[REQ ${reqId}] [CONTROLLER:login] Stack trace:`, mailErr.stack);
-          dbg("Sebelum res.json() (503 - gagal kirim OTP)");
-          res.status(503).json({
-            success: false,
-            error: mailErr.message,
-            stack: mailErr.stack,
-          });
-          dbg("Sesudah res.json() (503 - gagal kirim OTP) dipanggil");
-          return;
-        }
-
-        dbg("Sebelum res.json() (200 - require2FA)");
-        res.json({
-          require2FA: true,
-          email:      user.email,
-          message:    `Kode OTP dikirim ke ${user.email}. Berlaku ${OTP_EXPIRY_MINUTES} menit.`,
-        });
-        dbg("Sesudah res.json() (200 - require2FA) dipanggil");
-        return;
-      }
-
-      // ── 2FA tidak aktif: langsung issue JWT ────────────────────────────────
-      dbg("2FA tidak aktif — sebelum generate JWT");
-      const token = signToken(user);
-      dbg("Sesudah generate JWT — token berhasil dibuat");
-
-      const updateOnlineSql = "UPDATE users SET is_online = 1, last_seen_at = NOW() WHERE id = ?";
-      dbg(`Sebelum query database (update status online) — SQL: ${updateOnlineSql}`);
-      const onlineDbStart = process.hrtime.bigint();
-      await pool.query(updateOnlineSql, [user.id]);
-      const onlineDbDurationMs = (Number(process.hrtime.bigint() - onlineDbStart) / 1e6).toFixed(1);
-      dbg(`Sesudah query database (update status online) — durasi=${onlineDbDurationMs}ms`);
-
-      dbg("Sebelum res.json() (200 - login sukses)");
-      res.json({
-        token,
-        user: _publicUser(user),
-      });
-      dbg("Sesudah res.json() (200 - login sukses) dipanggil");
-    } catch (e) {
-      console.error(`[REQ ${reqId}] [CONTROLLER:login] ✖ Exception tertangkap:`, e.message);
-      console.error(`[REQ ${reqId}] [CONTROLLER:login] Stack trace lengkap:`, e.stack);
-      if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
-      next(e);
+    if (!rows.length) {
+      return res.status(401).json({ error: "Identitas atau password salah" });
     }
+
+    const user = rows[0];
+
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) {
+      return res.status(401).json({ error: "Identitas atau password salah" });
+    }
+
+    if (user.status === "menunggu_approval") {
+      return res.status(403).json({ error: "Akun masih menunggu approval admin", status: "pending" });
+    }
+    if (user.status === "nonaktif") {
+      return res.status(403).json({ error: "Akun dinonaktifkan" });
+    }
+
+    // ── 2FA aktif: kirim OTP, tunda JWT ──────────────────────────────────────
+    if (user.is_2fa_enabled) {
+      const otpPlain  = generateOtp();
+      const otpHash   = await hashOtp(otpPlain);
+      const expiresAt = getOtpExpiry();
+
+      await pool.query(
+        "UPDATE users SET otp_hash = ?, otp_expires_at = ?, otp_used = 0, otp_attempts = 0 WHERE id = ?",
+        [otpHash, expiresAt, user.id]
+      );
+
+      try {
+        await sendOtpEmail({ to: user.email, namaUser: user.nama, otpCode: otpPlain, expiryMin: OTP_EXPIRY_MINUTES });
+      } catch (mailErr) {
+        console.error("[auth:login] Gagal kirim OTP email:", mailErr.message);
+        return res.status(503).json({
+          success: false,
+          error: mailErr.message,
+        });
+      }
+
+      return res.json({
+        require2FA: true,
+        email:      user.email,
+        message:    `Kode OTP dikirim ke ${user.email}. Berlaku ${OTP_EXPIRY_MINUTES} menit.`,
+      });
+    }
+
+    // ── 2FA tidak aktif: langsung issue JWT ────────────────────────────────
+    const token = signToken(user);
+
+    // Update status online & catat audit log TIDAK di-await agar response
+    // login tidak menunggu 2 query tambahan (ini bagian dari optimasi
+    // kecepatan login — lihat Task 3). Kegagalan di sini tidak boleh
+    // menggagalkan login itu sendiri, jadi cukup dicatat ke console.
+    pool.query(
+      "UPDATE users SET is_online = 1, last_seen_at = NOW() WHERE id = ?",
+      [user.id]
+    ).catch((e) => console.error("[auth:login] Gagal update status online:", e.message));
+
+    logActivity(pool, {
+      documentId: null,
+      userId: user.id,
+      action: "Login ke sistem",
+    }).catch((e) => console.error("[auth:login] Gagal mencatat audit log:", e.message));
+
+    res.json({
+      token,
+      user: _publicUser(user),
+    });
+  } catch (e) {
+    if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
+    next(e);
   }
-);
+});
 
 // ── POST /api/auth/verify-otp ─────────────────────────────────────────────────
 router.post("/verify-otp", otpLimiter, async (req, res, next) => {
@@ -245,12 +202,21 @@ router.post("/verify-otp", otpLimiter, async (req, res, next) => {
       });
     }
 
+    // is_online diupdate lebih dulu (dibutuhkan agar status login konsisten),
+    // TAPI tidak diikutkan JSON.parse/proses berat apa pun setelah ini.
     await pool.query(
       "UPDATE users SET otp_used = 1, otp_attempts = 0, is_online = 1, last_seen_at = NOW() WHERE id = ?",
       [user.id]
     );
 
     const token = signToken(user);
+
+    logActivity(pool, {
+      documentId: null,
+      userId: user.id,
+      action: "Login ke sistem (verifikasi OTP 2FA)",
+    }).catch((e) => console.error("[auth:verify-otp] Gagal mencatat audit log:", e.message));
+
     res.json({
       token,
       user: _publicUser(user),
@@ -395,6 +361,14 @@ router.post("/disable-2fa", authRequired, async (req, res, next) => {
 router.post("/logout", authRequired, async (req, res, next) => {
   try {
     await pool.query("UPDATE users SET is_online = 0 WHERE id = ?", [req.user.id]);
+
+    // Fire-and-forget: jangan tahan response logout hanya demi menulis audit log.
+    logActivity(pool, {
+      documentId: null,
+      userId: req.user.id,
+      action: "Logout dari sistem",
+    }).catch((e) => console.error("[auth:logout] Gagal mencatat audit log:", e.message));
+
     res.json({ message: "Logout berhasil" });
   } catch (e) {
     next(e);
@@ -446,6 +420,28 @@ router.post("/change-password", authRequired, async (req, res, next) => {
     res.json({ message: "Password berhasil diubah", mustChangePassword: false });
   } catch (e) {
     if (e.name === "ZodError") return res.status(400).json({ error: e.errors.map((x) => x.message).join(", ") });
+    next(e);
+  }
+});
+
+// ── POST /api/auth/refresh-session ────────────────────────────────────────────
+// Dipanggil frontend secara berkala SELAMA user masih aktif (klik, mousemove,
+// keyboard, scroll, atau request API apa pun) untuk memperpanjang masa
+// berlaku token tanpa perlu login ulang. Ini yang membuat "idle 12 jam" bisa
+// bersifat sliding: selama user aktif, sesi terus diperpanjang; begitu user
+// benar-benar diam selama 12 jam, frontend berhenti memanggil endpoint ini
+// dan token lama-lama kedaluwarsa dengan sendirinya (lihat useIdleSession.js).
+router.post("/refresh-session", authRequired, async (req, res, next) => {
+  try {
+    const [rows] = await pool.query(
+      "SELECT id, nama, email, role FROM users WHERE id = ? AND status = 'active'",
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(401).json({ error: "Sesi tidak valid" });
+
+    const token = signToken(rows[0]);
+    res.json({ token });
+  } catch (e) {
     next(e);
   }
 });

@@ -17,6 +17,8 @@ const express = require("express");
 const { authRequired } = require("../middleware/auth");
 const upload = require("../middleware/upload");
 const { analyzeDocumentImage } = require("../services/geminiService");
+const pool = require("../config/db");
+const { logActivity } = require("../utils/auditLog");
 
 const router = express.Router();
 router.use(authRequired);
@@ -49,6 +51,13 @@ router.post("/scan", upload.single("image"), async (req, res) => {
         message: "Dokumen tidak didukung OCR",
       });
     }
+
+    logActivity(pool, {
+      documentId: null,
+      userId: req.user.id,
+      action: `Melakukan OCR dokumen (${result.document_type}, ${req.file.originalname})`,
+      newValue: { document_type: result.document_type, filename: req.file.originalname },
+    }).catch((e) => console.error("[ocr:scan] Gagal mencatat audit log:", e.message));
 
     return res.json({
       document_type: result.document_type,

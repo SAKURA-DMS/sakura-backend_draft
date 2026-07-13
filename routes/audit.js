@@ -6,10 +6,33 @@ const { requirePermission } = require("../middleware/rbac");
 const router = express.Router();
 router.use(authRequired);
 
-// GET /api/audit?document_id=...
+// mysql2 sudah otomatis meng-parse kolom bertipe JSON (old_value, new_value)
+// menjadi object/array JS asli. Memanggil JSON.parse() lagi pada value yang
+// sudah berupa object akan memicu `object.toString()` -> "[object Object]",
+// lalu JSON.parse("[object Object]") melempar SyntaxError — inilah sumber
+// error "[object Object] is not valid JSON" yang membuat request /api/audit
+// selalu gagal (500) sehingga menu Log tampak selalu kosong.
+//
+// Fungsi ini aman dipakai baik saat driver DB sudah mem-parse otomatis
+// (object/array/null) maupun saat nilainya masih berupa string JSON mentah
+// (mis. beda versi driver/konfigurasi), tanpa pernah melempar exception.
+function safeParseJsonColumn(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "object") return value; // sudah ter-parse oleh mysql2
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+// GET /api/audit?document_id=...&limit=...&offset=...
 router.get("/", requirePermission("audit.view"), async (req, res, next) => {
   try {
-    const { document_id, limit = 200 } = req.query;
+    const { document_id, limit = 200, offset = 0 } = req.query;
 
     const where = [];
     const params = [];
@@ -18,6 +41,11 @@ router.get("/", requirePermission("audit.view"), async (req, res, next) => {
       where.push("a.document_id = ?");
       params.push(document_id);
     }
+
+    // Batasi limit ke rentang yang wajar supaya query tidak dibanjiri
+    // parameter aneh dari client (mis. limit negatif / non-angka).
+    const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+    const safeOffset = Math.max(Number(offset) || 0, 0);
 
     const sql = `
       SELECT
@@ -34,25 +62,20 @@ router.get("/", requirePermission("audit.view"), async (req, res, next) => {
         ON d.id = a.document_id
       ${where.length ? "WHERE " + where.join(" AND ") : ""}
       ORDER BY a.created_at DESC
-      LIMIT ?
+      LIMIT ? OFFSET ?
     `;
 
-    params.push(Number(limit));
+    params.push(safeLimit, safeOffset);
 
     const [rows] = await pool.query(sql, params);
 
     const logs = rows.map((log) => ({
       ...log,
 
-      old_value:
-        log.old_value
-          ? JSON.parse(log.old_value)
-          : null,
-
-      new_value:
-        log.new_value
-          ? JSON.parse(log.new_value)
-          : null,
+      // FIX: jangan JSON.parse() nilai yang sudah di-parse otomatis oleh
+      // mysql2 (lihat penjelasan safeParseJsonColumn di atas).
+      old_value: safeParseJsonColumn(log.old_value),
+      new_value: safeParseJsonColumn(log.new_value),
 
       integrity_status:
         log.current_hash
@@ -61,7 +84,12 @@ router.get("/", requirePermission("audit.view"), async (req, res, next) => {
     }));
 
     res.json({
-      logs
+      logs,
+      pagination: {
+        limit: safeLimit,
+        offset: safeOffset,
+        count: logs.length
+      }
     });
 
   } catch (e) {
