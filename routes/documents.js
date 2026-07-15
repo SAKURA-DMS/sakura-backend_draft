@@ -1,4 +1,5 @@
 const express = require("express");
+const bcrypt  = require("bcrypt");
 const pool    = require("../config/db");
 const { authRequired }      = require("../middleware/auth");
 const { requirePermission } = require("../middleware/rbac");
@@ -344,9 +345,38 @@ router.get("/:id/preview", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/documents/:id/download-stream — proxy stream file asli dari storage ─
-router.get("/:id/download-stream", async (req, res, next) => {
+// ── POST /api/documents/:id/download-stream — proxy stream file asli dari storage ─
+// Wajib konfirmasi password sebelum file diizinkan diunduh (lihat Bagian B
+// permintaan perbaikan: "Password Confirmation sebelum Download"). Password
+// dikirim dari frontend HANYA untuk dicocokkan hash-nya di backend — tidak
+// pernah dipercaya begitu saja dan tidak pernah membuat session/login baru.
+router.post("/:id/download-stream", async (req, res, next) => {
   try {
+    const { password } = req.body || {};
+
+    // Validasi wajib isi — sama seperti validasi field wajib lainnya di app ini.
+    if (!password || !String(password).trim()) {
+      return res.status(400).json({ error: "Password wajib diisi" });
+    }
+
+    // Ambil hash password milik USER YANG SEDANG LOGIN (bukan dari frontend),
+    // lalu cocokkan. Ini murni konfirmasi identitas, BUKAN login ulang —
+    // tidak ada token baru yang diterbitkan, session yang sedang berjalan
+    // tetap sama persis seperti sebelum popup muncul.
+    const [[account]] = await pool.query(
+      "SELECT password_hash FROM users WHERE id = ?",
+      [req.user.id]
+    );
+    if (!account) return res.status(404).json({ error: "Akun tidak ditemukan" });
+
+    const passwordMatch = await bcrypt.compare(String(password), account.password_hash);
+    if (!passwordMatch) {
+      // Sengaja pakai 403 (bukan 401) supaya tidak memicu interceptor axios
+      // yang men-treat status 401 sebagai "sesi kedaluwarsa" lalu logout paksa
+      // — padahal ini cuma kesalahan mengetik password, session tetap valid.
+      return res.status(403).json({ error: "Password salah" });
+    }
+
     const [[doc]] = await pool.query(
       "SELECT id, judul, file_blob_name, mime_type, original_filename, deleted_at, is_sensitive, uploaded_by FROM documents WHERE id = ?",
       [req.params.id]

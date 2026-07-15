@@ -62,6 +62,10 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
 
     if (!departemen?.trim())     return res.status(400).json({ error: "Departemen wajib diisi." });
 
+    if (userRole === "Guru" && !nip?.trim()) {
+      return res.status(400).json({ error: "NIP wajib diisi untuk role Guru." });
+    }
+
     // Cek email unik
     const [existing] = await pool.query("SELECT id FROM users WHERE email = ?", [email.trim()]);
     if (existing.length) {
@@ -205,6 +209,10 @@ router.patch("/:id", async (req, res, next) => {
     }
 
     const { nama, email, role, departemen, nip } = req.body;
+
+    if (role === "Guru" && !nip?.trim()) {
+      return res.status(400).json({ error: "NIP wajib diisi untuk role Guru." });
+    }
 
     if (email) {
       const [existing] = await pool.query(

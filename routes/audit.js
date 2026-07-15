@@ -33,6 +33,7 @@ function safeParseJsonColumn(value) {
 router.get("/", requirePermission("audit.view"), async (req, res, next) => {
   try {
     const { document_id, limit = 200, offset = 0 } = req.query;
+    const role = req.user.role;
 
     const where = [];
     const params = [];
@@ -40,6 +41,38 @@ router.get("/", requirePermission("audit.view"), async (req, res, next) => {
     if (document_id) {
       where.push("a.document_id = ?");
       params.push(document_id);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Query builder WHERE berbasis role — SATU query yang sama dipakai untuk
+    // semua role. Frontend tetap memakai komponen/renderer/accordion yang
+    // identik untuk semua role; yang berbeda HANYA baris data yang boleh
+    // dikembalikan backend sesuai permission, bukan tampilan.
+    //
+    //   - Operator/TU (Admin)  → semua aktivitas, tanpa filter tambahan.
+    //   - Kepala Sekolah       → hanya kategori aktivitas yang diizinkan
+    //                            (aktivitas penting, bukan aktivitas teknis
+    //                            harian seperti "melihat dokumen").
+    //   - Role lain (mis. Guru)→ hanya aktivitas miliknya sendiri.
+    //
+    // Sebelumnya filter untuk Kepala Sekolah dilakukan di FRONTEND (Array
+    // .filter di LogPage.jsx) — artinya seluruh data (termasuk milik user
+    // lain) tetap terkirim ke browser dan hanya disembunyikan secara visual.
+    // Ini dipindah ke backend supaya benar-benar tidak pernah dikirim ke
+    // client yang tidak berhak melihatnya.
+    // ─────────────────────────────────────────────────────────────────────
+    if (role === "Kepala Sekolah") {
+      const principalOnlyActions = [
+        "mengunggah", "menyetujui", "menolak",
+        "mengarsipkan", "menghapus", "mengubah",
+      ];
+      where.push(
+        "(" + principalOnlyActions.map(() => "a.action LIKE ?").join(" OR ") + ")"
+      );
+      principalOnlyActions.forEach((kw) => params.push(`%${kw}%`));
+    } else if (role !== "Operator/TU") {
+      where.push("a.user_id = ?");
+      params.push(req.user.id);
     }
 
     // Batasi limit ke rentang yang wajar supaya query tidak dibanjiri
