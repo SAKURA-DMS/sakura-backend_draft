@@ -104,6 +104,13 @@ CREATE TABLE `documents` (
   `mime_type` varchar(120) COLLATE utf8mb4_general_ci DEFAULT NULL,
   `original_filename` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
   `catatan` text COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `approval_required` tinyint(1) NOT NULL DEFAULT '1',        -- <-- kolom baru (Toggle Approval Kepsek)
+  `is_sensitive` tinyint(1) NOT NULL DEFAULT '0',              -- <-- kolom baru (Dokumen Sensitif)
+  `owner_user_id` int DEFAULT NULL,                             -- <-- kolom baru (pemilik dokumen sensitif)
+  `owner_nip` varchar(50) COLLATE utf8mb4_general_ci DEFAULT NULL, -- <-- kolom baru
+  `approval_status` enum('not_required', 'pending', 'approved', 'rejected') COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'pending', -- <-- kolom baru
+  `approved_by` int DEFAULT NULL,                               -- <-- kolom baru
+  `approved_at` datetime DEFAULT NULL,                          -- <-- kolom baru
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `deleted_at` datetime DEFAULT NULL,
@@ -114,7 +121,24 @@ CREATE TABLE `documents` (
   KEY `idx_docs_status` (`status`),
   KEY `idx_docs_cat` (`category_id`),
   KEY `idx_docs_type` (`type_id`),
-  KEY `idx_docs_deleted` (`deleted_at`)
+  KEY `idx_docs_deleted` (`deleted_at`),
+  KEY `idx_docs_sensitive` (`is_sensitive`),          -- <-- index baru
+  KEY `idx_docs_owner` (`owner_user_id`),             -- <-- index baru
+  KEY `idx_docs_approval_status` (`approval_status`)  -- <-- index baru
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- sakura_dms.document_owners definition (tabel baru — Toggle Approval Kepsek + Dokumen Sensitif)
+
+CREATE TABLE `document_owners` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `document_id` int NOT NULL,
+  `user_id` int NOT NULL,
+  `nip` varchar(50) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)/*T![clustered_index] NONCLUSTERED */,
+  UNIQUE KEY `uniq_document_owner` (`document_id`, `user_id`),
+  KEY `idx_do_document` (`document_id`),
+  KEY `idx_do_user` (`user_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
 
 -- sakura_dms.folders definition
@@ -302,3 +326,44 @@ CREATE TABLE `users` (
 -- Ini yang MASIH PERLU dijalankan (Task 1 - Log System):
 ALTER TABLE audit_trail
   MODIFY COLUMN document_id int NULL;
+
+-- ============================================================================
+-- Migration: Toggle "Butuh Approval Kepsek" + Dokumen Sensitif (owner NIP)
+-- ============================================================================
+-- CATATAN TiDB: setiap ADD COLUMN dipisah jadi statement ALTER TABLE sendiri
+-- (bukan digabung dalam satu ALTER TABLE ... ADD COLUMN ... ADD COLUMN ...).
+-- Ini untuk menghindari error "Unknown column 'x' in documents" yang muncul
+-- di TiDB ketika kolom baru dijadikan referensi `AFTER` untuk kolom lain
+-- dalam SATU statement ALTER TABLE yang sama.
+--
+-- Jalankan berurutan dari atas ke bawah. Skrip ini aman dijalankan ulang
+-- (idempotent) — kalau kolom/tabel sudah ada, tinggal skip baris yang error
+-- "Duplicate column" / "already exists" dan lanjutkan ke baris berikutnya.
+-- ============================================================================
+USE sakura_dms;
+-- TASK 1 — Toggle "Butuh Approval Kepsek"
+ALTER TABLE `documents` ADD COLUMN `approval_required` TINYINT(1) NOT NULL DEFAULT 1 AFTER `catatan`;
+ALTER TABLE `documents` ADD COLUMN `is_sensitive`      TINYINT(1) NOT NULL DEFAULT 0 AFTER `approval_required`;
+ALTER TABLE `documents` ADD COLUMN `owner_user_id`     INT NULL DEFAULT NULL AFTER `is_sensitive`;
+ALTER TABLE `documents` ADD COLUMN `owner_nip`         VARCHAR(50) NULL DEFAULT NULL AFTER `owner_user_id`;
+ALTER TABLE `documents` ADD COLUMN `approval_status`   ENUM('not_required','pending','approved','rejected') NOT NULL DEFAULT 'pending' AFTER `owner_nip`;
+ALTER TABLE `documents` ADD COLUMN `approved_by`       INT NULL DEFAULT NULL AFTER `approval_status`;
+ALTER TABLE `documents` ADD COLUMN `approved_at`       DATETIME NULL DEFAULT NULL AFTER `approved_by`;
+-- Index (dipisah juga, satu per statement)
+ALTER TABLE `documents` ADD KEY `idx_docs_sensitive` (`is_sensitive`);
+ALTER TABLE `documents` ADD KEY `idx_docs_owner` (`owner_user_id`);
+ALTER TABLE `documents` ADD KEY `idx_docs_approval_status` (`approval_status`);
+-- Backfill approval_status untuk dokumen lama supaya konsisten dengan status saat ini
+UPDATE `documents` SET `approval_status` = 'approved' WHERE `status` = 'Diarsipkan' AND `approval_status` = 'pending';
+UPDATE `documents` SET `approval_status` = 'rejected' WHERE `status` = 'Ditolak'   AND `approval_status` = 'pending';
+CREATE TABLE IF NOT EXISTS `document_owners` (
+  `id`          INT NOT NULL AUTO_INCREMENT,
+  `document_id` INT NOT NULL,
+  `user_id`     INT NOT NULL,
+  `nip`         VARCHAR(50) DEFAULT NULL,
+  `created_at`  DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_document_owner` (`document_id`, `user_id`),
+  KEY `idx_do_document` (`document_id`),
+  KEY `idx_do_user`     (`user_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
