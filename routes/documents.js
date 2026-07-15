@@ -11,6 +11,7 @@ const {
   checkFileExists,
 } = require("../services/supabaseStorage");
 const { generateAuditHash } = require("../utils/auditHash");
+const { normalizeDateToISO } = require("../utils/dateParser");
 
 const router = express.Router();
 router.use(authRequired);
@@ -355,6 +356,24 @@ router.post(
       parsedMeta = typeof metadata === "string" ? JSON.parse(metadata) : metadata;
     } catch {
       return res.status(400).json({ error: "Field metadata bukan JSON valid" });
+    }
+
+    // ── Normalisasi & validasi field tanggal (hasil OCR bisa berupa berbagai
+    // format seperti "17 Januari 1999", "17/01/1999", dst). Dilakukan di sini
+    // (sebelum upload ke storage) supaya jika parsing gagal, request ditolak
+    // dengan pesan yang jelas TANPA sempat mengunggah file / menyentuh DB.
+    // Hasil OCR mentah sendiri tidak diubah — ini hanya menormalisasi nilai
+    // yang akan disimpan ke kolom DATE di database.
+    const DATE_FIELDS = ["tanggalLahir", "tanggalSurat", "tanggalDiterima", "tanggalSK"];
+    if (parsedMeta && typeof parsedMeta === "object") {
+      for (const field of DATE_FIELDS) {
+        if (parsedMeta[field] === undefined) continue;
+        const { value, error } = normalizeDateToISO(parsedMeta[field]);
+        if (error) {
+          return res.status(400).json({ error: `${field}: ${error}` });
+        }
+        parsedMeta[field] = value;
+      }
     }
 
     // ── Upload ke Supabase Storage DULU (sebelum transaksi DB) ────────────────
