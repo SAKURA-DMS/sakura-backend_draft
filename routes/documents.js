@@ -129,6 +129,27 @@ async function addAudit(
   ]);
 }
 
+// ── Sensitive doc access helper ───────────────────────────────────────────────
+// "Admin" (Operator/TU & Kepala Sekolah) tetap memiliki akses penuh, mengikuti
+// pola akses yang sudah ada di endpoint ini (lihat pengecekan role "Guru" di
+// bawah). Guru hanya boleh membuka dokumen sensitif jika dirinya terdaftar
+// sebagai salah satu owner (document_owners), ATAU dia uploader-nya sendiri.
+async function assertSensitiveAccess(conn, doc, user) {
+  if (!doc.is_sensitive) return;
+  if (user.role !== "Guru") return; // Operator/TU & Kepala Sekolah = akses penuh
+  if (doc.uploaded_by === user.id) return;
+
+  const [[owned]] = await conn.query(
+    "SELECT 1 FROM document_owners WHERE document_id = ? AND user_id = ? LIMIT 1",
+    [doc.id, user.id]
+  );
+  if (!owned) {
+    const err = new Error("Anda tidak memiliki izin membuka dokumen ini.");
+    err.status = 403;
+    throw err;
+  }
+}
+
 // ── GET /api/documents — list dengan filter ───────────────────────────────────
 router.get("/", async (req, res, next) => {
   try {
@@ -146,12 +167,14 @@ router.get("/", async (req, res, next) => {
     if (tahun_ajaran){ where.push("d.tahun_ajaran = ?");                  params.push(tahun_ajaran); }
     if (q)           { where.push("(d.judul LIKE ? OR d.nomor_dokumen LIKE ?)"); params.push(`%${q}%`, `%${q}%`); }
 
-    // Guru cuma boleh melihat dokumen miliknya sendiri. Ini di-enforce di
-    // level query (bukan cuma disembunyikan di UI) supaya tidak bisa
-    // dilewati dengan memanggil API secara langsung.
+    // Guru cuma boleh melihat dokumen miliknya sendiri, DITAMBAH dokumen
+    // sensitif yang dirinya terdaftar sebagai owner (mis. diupload oleh
+    // Operator/TU atas nama guru tsb.). Ini di-enforce di level query (bukan
+    // cuma disembunyikan di UI) supaya tidak bisa dilewati dengan memanggil
+    // API secara langsung.
     if (req.user.role === "Guru") {
-      where.push("d.uploaded_by = ?");
-      params.push(req.user.id);
+      where.push("(d.uploaded_by = ? OR d.id IN (SELECT document_id FROM document_owners WHERE user_id = ?))");
+      params.push(req.user.id, req.user.id);
     }
 
     const [rows] = await pool.query(
@@ -220,8 +243,13 @@ router.get("/:id", async (req, res, next) => {
       [req.params.id]
     );
     if (!doc) return res.status(404).json({ error: "Dokumen tidak ditemukan" });
-    if (req.user.role === "Guru" && doc.uploaded_by !== req.user.id) {
+    if (req.user.role === "Guru" && doc.uploaded_by !== req.user.id && !doc.is_sensitive) {
       return res.status(403).json({ error: "Akses ditolak" });
+    }
+    try {
+      await assertSensitiveAccess(pool, doc, req.user);
+    } catch (accessErr) {
+      return res.status(accessErr.status || 403).json({ error: accessErr.message });
     }
 
     const [trail] = await pool.query(
@@ -263,12 +291,17 @@ router.get("/:id", async (req, res, next) => {
 router.get("/:id/download", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
-      "SELECT id, judul, file_blob_name, file_url, mime_type, original_filename, deleted_at FROM documents WHERE id = ?",
+      "SELECT id, judul, file_blob_name, file_url, mime_type, original_filename, deleted_at, is_sensitive, uploaded_by FROM documents WHERE id = ?",
       [req.params.id]
     );
     if (!doc)          return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
     if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan untuk dokumen ini" });
+    try {
+      await assertSensitiveAccess(pool, doc, req.user);
+    } catch (accessErr) {
+      return res.status(accessErr.status || 403).json({ error: accessErr.message });
+    }
 
     const expiryMinutes = Number(req.query.expiry) || 60;
     const fileUrl = await getFileUrl(doc.file_blob_name);
@@ -289,12 +322,17 @@ router.get("/:id/download", async (req, res, next) => {
 router.get("/:id/preview", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
-      "SELECT id, judul, file_blob_name, file_url, mime_type, original_filename, deleted_at FROM documents WHERE id = ?",
+      "SELECT id, judul, file_blob_name, file_url, mime_type, original_filename, deleted_at, is_sensitive, uploaded_by FROM documents WHERE id = ?",
       [req.params.id]
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
     if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan untuk dokumen ini" });
+    try {
+      await assertSensitiveAccess(pool, doc, req.user);
+    } catch (accessErr) {
+      return res.status(accessErr.status || 403).json({ error: accessErr.message });
+    }
 
     const fileUrl = await getFileUrl(doc.file_blob_name);
 
@@ -310,12 +348,17 @@ router.get("/:id/preview", async (req, res, next) => {
 router.get("/:id/download-stream", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
-      "SELECT id, judul, file_blob_name, mime_type, original_filename, deleted_at FROM documents WHERE id = ?",
+      "SELECT id, judul, file_blob_name, mime_type, original_filename, deleted_at, is_sensitive, uploaded_by FROM documents WHERE id = ?",
       [req.params.id]
     );
     if (!doc)           return res.status(404).json({ error: "Dokumen tidak ditemukan" });
     if (doc.deleted_at) return res.status(410).json({ error: "Dokumen sudah dihapus" });
     if (!doc.file_blob_name) return res.status(422).json({ error: "File path Supabase tidak ditemukan" });
+    try {
+      await assertSensitiveAccess(pool, doc, req.user);
+    } catch (accessErr) {
+      return res.status(accessErr.status || 403).json({ error: accessErr.message });
+    }
 
     // Download buffer dari storage
     const buffer = await downloadFileBuffer(doc.file_blob_name);
@@ -345,11 +388,61 @@ router.post(
       return res.status(400).json({ error: "File wajib diupload (field name: file)" });
     }
 
-    const { judul, category_id, type_id, folder_id = null, tahun_ajaran = null, catatan = null, metadata = "{}" } = req.body;
+    const {
+      judul, category_id, type_id, folder_id = null, tahun_ajaran = null, catatan = null, metadata = "{}",
+      // ── Butuh Approval Kepsek (Task 1) ──────────────────────────────────
+      // Default TIDAK dikirim = tetap dianggap "ON" (true) supaya perilaku
+      // lama (semua upload otomatis masuk antrian persetujuan) tidak berubah
+      // untuk client lama / request yang belum tahu field baru ini.
+      approval_required = "true",
+      // ── Dokumen Sensitive (Task 2) ───────────────────────────────────────
+      is_sensitive = "false",
+      owner_nips = "[]",
+    } = req.body;
 
     if (!judul)       return res.status(400).json({ error: "judul wajib diisi" });
     if (!category_id) return res.status(400).json({ error: "category_id wajib diisi" });
     if (!type_id)     return res.status(400).json({ error: "type_id wajib diisi" });
+
+    const approvalRequired = String(approval_required) !== "false" && approval_required !== "0" && approval_required !== false;
+    const sensitiveFlag    = String(is_sensitive) === "true" || is_sensitive === "1" || is_sensitive === true;
+
+    // Parse daftar NIP pemilik dokumen sensitif (dikirim sebagai JSON array
+    // string dari form, mis. '["123456789","198723450001"]').
+    let ownerNips = [];
+    if (sensitiveFlag) {
+      try {
+        ownerNips = typeof owner_nips === "string" ? JSON.parse(owner_nips) : owner_nips;
+      } catch {
+        return res.status(400).json({ error: "Field owner_nips bukan JSON array yang valid" });
+      }
+      if (!Array.isArray(ownerNips)) ownerNips = [ownerNips].filter(Boolean);
+      ownerNips = [...new Set(ownerNips.map((n) => String(n).trim()).filter(Boolean))];
+
+      // Validasi: Sensitive aktif -> NIP pemilik wajib dipilih, tidak boleh kosong.
+      if (ownerNips.length === 0) {
+        return res.status(400).json({ error: "NIP pemilik dokumen wajib dipilih untuk dokumen sensitif" });
+      }
+    }
+
+    // Resolve NIP -> user aktif (validasi bahwa NIP yang dipilih benar-benar
+    // ada & user-nya masih aktif). Dilakukan SEBELUM upload ke storage supaya
+    // request ditolak lebih awal jika data owner tidak valid.
+    let ownerUsers = [];
+    if (sensitiveFlag) {
+      const [rows] = await pool.query(
+        `SELECT id, nama, nip FROM users WHERE nip IN (?) AND status = 'active'`,
+        [ownerNips]
+      );
+      const foundNips = new Set(rows.map((r) => r.nip));
+      const missing = ownerNips.filter((n) => !foundNips.has(n));
+      if (missing.length) {
+        return res.status(400).json({
+          error: `NIP pemilik dokumen tidak ditemukan atau bukan user aktif: ${missing.join(", ")}`,
+        });
+      }
+      ownerUsers = rows;
+    }
 
     let parsedMeta;
     try {
@@ -399,14 +492,23 @@ router.post(
       // 1. Generate nomor dokumen (dengan lock counter)
       const nomor = await generateDocumentNumber(conn, category_id, type_id);
 
+      // ── Flow approval (Task 1) ────────────────────────────────────────────
+      // approval_required = ON  -> status awal 'Menunggu' (sama seperti flow lama)
+      // approval_required = OFF -> status langsung 'Diarsipkan', TIDAK dibuatkan
+      //                             approval_request, langsung masuk Arsip.
+      const initialStatus   = approvalRequired ? "Menunggu"   : "Diarsipkan";
+      const approvalStatus  = approvalRequired ? "pending"    : "not_required";
+      const primaryOwner    = ownerUsers[0] || null;
+
       // 2. Insert dokumen (id di-generate otomatis oleh AUTO_INCREMENT)
       const [ins] = await conn.query(
         `INSERT INTO documents
           (judul, nomor_dokumen, category_id, type_id, folder_id, tahun_ajaran,
             status, versi, uploaded_by,
-            file_url, file_blob_name, file_size, mime_type, original_filename, catatan)
+            file_url, file_blob_name, file_size, mime_type, original_filename, catatan,
+            approval_required, is_sensitive, owner_user_id, owner_nip, approval_status)
           VALUES
-          (?, ?, ?, ?, ?, ?, 'Menunggu', 1, ?, ?, ?, ?, ?, ?, ?)`,
+          (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             judul,
             nomor,
@@ -414,6 +516,7 @@ router.post(
             type_id,
             folder_id || null,
             tahun_ajaran || null,
+            initialStatus,
             req.user.id,
             blob.url,
             blob.blobName,
@@ -421,9 +524,22 @@ router.post(
             blob.mimeType,
             req.file.originalname,
             catatan || null,
+            approvalRequired ? 1 : 0,
+            sensitiveFlag ? 1 : 0,
+            primaryOwner ? primaryOwner.id : null,
+            primaryOwner ? primaryOwner.nip : null,
+            approvalStatus,
           ]
       );
       const docId = ins.insertId;
+
+      // 2b. Simpan seluruh owner (dokumen sensitif bisa punya lebih dari 1 NIP)
+      if (sensitiveFlag && ownerUsers.length) {
+        await conn.query(
+          `INSERT INTO document_owners (document_id, user_id, nip) VALUES ?`,
+          [ownerUsers.map((u) => [docId, u.id, u.nip])]
+        );
+      }
 
       // 3. Insert metadata per kategori
       await insertMetadata(conn, docId, Number(category_id), Number(type_id), parsedMeta);
@@ -437,50 +553,68 @@ router.post(
           null,
           null,
           {
-              status: "Menunggu",
+              status: initialStatus,
               versi: 1,
-              filename: req.file.originalname
+              filename: req.file.originalname,
+              approvalRequired,
+              isSensitive: sensitiveFlag,
           }
       );
 
-      // 5. Auto-create approval_request agar dokumen muncul di halaman persetujuan
-      const [aprIns] = await conn.query(
-        `INSERT INTO approval_requests (document_id, requester_id, status, requester_note, requested_at)
-         VALUES (?, ?, 'pending', NULL, NOW())`,
-        [docId, req.user.id]
-      );
-      const requestId = aprIns.insertId;
+      if (approvalRequired) {
+        // 5. Auto-create approval_request agar dokumen muncul di halaman persetujuan
+        const [aprIns] = await conn.query(
+          `INSERT INTO approval_requests (document_id, requester_id, status, requester_note, requested_at)
+           VALUES (?, ?, 'pending', NULL, NOW())`,
+          [docId, req.user.id]
+        );
+        const requestId = aprIns.insertId;
 
-      // Audit: pengajuan persetujuan otomatis
-      await addAudit(
-          conn,
-          docId,
-          req.user.id,
-          "Mengajukan persetujuan dokumen",
-          requestId,
-          null,
-          {
-              status: "Menunggu"
-          }
-      );
+        // Audit: pengajuan persetujuan otomatis
+        await addAudit(
+            conn,
+            docId,
+            req.user.id,
+            "Mengajukan persetujuan dokumen",
+            requestId,
+            null,
+            {
+                status: "Menunggu"
+            }
+        );
 
-      // 6. Notifikasi ke approver (Kepala Sekolah & Operator/TU aktif)
-      await conn.query(
-        `INSERT INTO notifications (user_id, message, type, document_id)
-         SELECT u.id, CONCAT('Dokumen baru menunggu persetujuan: ', ?), 'upload', ?
-         FROM users u
-         WHERE u.role IN ('Kepala Sekolah', 'Operator/TU') AND u.status = 'active' AND u.id != ?`,
-        [judul, docId, req.user.id]
-      );
+        // 6. Notifikasi ke approver (Kepala Sekolah & Operator/TU aktif)
+        await conn.query(
+          `INSERT INTO notifications (user_id, message, type, document_id)
+           SELECT u.id, CONCAT('Dokumen baru menunggu persetujuan: ', ?), 'upload', ?
+           FROM users u
+           WHERE u.role IN ('Kepala Sekolah', 'Operator/TU') AND u.status = 'active' AND u.id != ?`,
+          [judul, docId, req.user.id]
+        );
+      } else {
+        // Approval Kepsek OFF -> dokumen langsung diarsipkan, catat di audit trail.
+        await addAudit(
+            conn,
+            docId,
+            req.user.id,
+            "Dokumen langsung diarsipkan otomatis (tanpa approval Kepsek)",
+            null,
+            { status: "Menunggu" },
+            { status: "Diarsipkan" }
+        );
+      }
 
       await conn.commit();
       res.status(201).json({
-        id:             docId,
-        nomor_dokumen:  nomor,
-        file_url:       blob.url,
-        file_blob_name: blob.blobName,
-        file_size:      blob.size,
-        mime_type:      blob.mimeType,
+        id:                docId,
+        nomor_dokumen:     nomor,
+        file_url:          blob.url,
+        file_blob_name:    blob.blobName,
+        file_size:         blob.size,
+        mime_type:         blob.mimeType,
+        status:            initialStatus,
+        approval_required: approvalRequired,
+        is_sensitive:      sensitiveFlag,
       });
     } catch (dbErr) {
       await conn.rollback();
@@ -632,8 +766,10 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
     const { comment = "" } = req.body || {};
 
     const [r] = await conn.query(
-      "UPDATE documents SET status='Diarsipkan', updated_at=NOW() WHERE id=? AND status='Menunggu'",
-      [req.params.id]
+      `UPDATE documents
+         SET status='Diarsipkan', approval_status='approved', approved_by=?, approved_at=NOW(), updated_at=NOW()
+       WHERE id=? AND status='Menunggu'`,
+      [req.user.id, req.params.id]
     );
     if (!r.affectedRows) {
       await conn.rollback();
@@ -702,8 +838,10 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
     if (!reason) { await conn.rollback(); return res.status(400).json({ error: "reason wajib diisi" }); }
 
     const [r] = await conn.query(
-      "UPDATE documents SET status='Ditolak', catatan=?, updated_at=NOW() WHERE id=? AND status='Menunggu'",
-      [reason, req.params.id]
+      `UPDATE documents
+         SET status='Ditolak', catatan=?, approval_status='rejected', approved_by=?, approved_at=NOW(), updated_at=NOW()
+       WHERE id=? AND status='Menunggu'`,
+      [reason, req.user.id, req.params.id]
     );
     if (!r.affectedRows) {
       await conn.rollback();

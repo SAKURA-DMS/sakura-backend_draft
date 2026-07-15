@@ -423,8 +423,10 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
 
     // Update dokumen → Diarsipkan
     await conn.query(
-      "UPDATE documents SET status = 'Diarsipkan', updated_at = NOW() WHERE id = ?",
-      [ar.document_id]
+      `UPDATE documents
+         SET status = 'Diarsipkan', approval_status = 'approved', approved_by = ?, approved_at = NOW(), updated_at = NOW()
+       WHERE id = ?`,
+      [req.user.id, ar.document_id]
     );
 
     // Selesaikan juga approval_requests pending lain untuk dokumen yang sama
@@ -526,8 +528,10 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
 
     // Update dokumen → Ditolak, simpan alasan di catatan
     await conn.query(
-      "UPDATE documents SET status = 'Ditolak', catatan = ?, updated_at = NOW() WHERE id = ?",
-      [reason.trim(), ar.document_id]
+      `UPDATE documents
+         SET status = 'Ditolak', catatan = ?, approval_status = 'rejected', approved_by = ?, approved_at = NOW(), updated_at = NOW()
+       WHERE id = ?`,
+      [reason.trim(), req.user.id, ar.document_id]
     );
 
     // Selesaikan juga approval_requests pending lain untuk dokumen yang sama
