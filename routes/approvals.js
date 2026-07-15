@@ -182,7 +182,7 @@ router.get("/", requirePermission("approvals.view"), async (req, res, next) => {
          apr.role  AS approver_role,
          -- dokumen
          d.judul, d.nomor_dokumen, d.status AS doc_status,
-         d.category_id, d.type_id, d.versi,
+         d.category_id, d.type_id, d.versi, d.is_urgent,
          c.category_name,
          dt.type_name
        FROM approval_requests ar
@@ -193,6 +193,7 @@ router.get("/", requirePermission("approvals.view"), async (req, res, next) => {
        LEFT JOIN document_types dt ON dt.type_id   = d.type_id
        ${whereClause}
        ORDER BY
+         d.is_urgent DESC,
          (TIMESTAMPDIFF(HOUR, ar.requested_at, NOW()) >= 72) DESC,
          CASE WHEN TIMESTAMPDIFF(HOUR, ar.requested_at, NOW()) >= 72 THEN ar.requested_at END ASC,
          CASE WHEN TIMESTAMPDIFF(HOUR, ar.requested_at, NOW()) < 72  THEN ar.requested_at END DESC

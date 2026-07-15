@@ -111,6 +111,7 @@ CREATE TABLE `documents` (
   `approval_status` enum('not_required', 'pending', 'approved', 'rejected') COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'pending', -- <-- kolom baru
   `approved_by` int DEFAULT NULL,                               -- <-- kolom baru
   `approved_at` datetime DEFAULT NULL,                          -- <-- kolom baru
+  `is_urgent` tinyint(1) NOT NULL DEFAULT '0',                  -- <-- kolom baru (toggle Urgent saat upload)
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `deleted_at` datetime DEFAULT NULL,
@@ -124,7 +125,8 @@ CREATE TABLE `documents` (
   KEY `idx_docs_deleted` (`deleted_at`),
   KEY `idx_docs_sensitive` (`is_sensitive`),          -- <-- index baru
   KEY `idx_docs_owner` (`owner_user_id`),             -- <-- index baru
-  KEY `idx_docs_approval_status` (`approval_status`)  -- <-- index baru
+  KEY `idx_docs_approval_status` (`approval_status`), -- <-- index baru
+  KEY `idx_docs_urgent` (`is_urgent`)                 -- <-- index baru
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
 
 -- sakura_dms.document_owners definition (tabel baru — Toggle Approval Kepsek + Dokumen Sensitif)
@@ -367,3 +369,11 @@ CREATE TABLE IF NOT EXISTS `document_owners` (
   KEY `idx_do_document` (`document_id`),
   KEY `idx_do_user`     (`user_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- ============================================================================
+-- Migration: Toggle "Urgent" — dokumen urgent tampil paling atas/kiri di
+-- halaman Persetujuan (Antrian Persetujuan) dan tab Persetujuan di Dashboard.
+-- ============================================================================
+USE sakura_dms;
+ALTER TABLE `documents` ADD COLUMN `is_urgent` TINYINT(1) NOT NULL DEFAULT 0 AFTER `approved_at`;
+ALTER TABLE `documents` ADD KEY `idx_docs_urgent` (`is_urgent`);

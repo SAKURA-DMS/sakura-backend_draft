@@ -398,6 +398,8 @@ router.post(
       // ── Dokumen Sensitive (Task 2) ───────────────────────────────────────
       is_sensitive = "false",
       owner_nips = "[]",
+      // ── Urgent ───────────────────────────────────────────────────────────
+      is_urgent = "false",
     } = req.body;
 
     if (!judul)       return res.status(400).json({ error: "judul wajib diisi" });
@@ -406,6 +408,7 @@ router.post(
 
     const approvalRequired = String(approval_required) !== "false" && approval_required !== "0" && approval_required !== false;
     const sensitiveFlag    = String(is_sensitive) === "true" || is_sensitive === "1" || is_sensitive === true;
+    const urgentFlag       = String(is_urgent) === "true" || is_urgent === "1" || is_urgent === true;
 
     // Parse daftar NIP pemilik dokumen sensitif (dikirim sebagai JSON array
     // string dari form, mis. '["123456789","198723450001"]').
@@ -506,9 +509,9 @@ router.post(
           (judul, nomor_dokumen, category_id, type_id, folder_id, tahun_ajaran,
             status, versi, uploaded_by,
             file_url, file_blob_name, file_size, mime_type, original_filename, catatan,
-            approval_required, is_sensitive, owner_user_id, owner_nip, approval_status)
+            approval_required, is_sensitive, owner_user_id, owner_nip, approval_status, is_urgent)
           VALUES
-          (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             judul,
             nomor,
@@ -529,6 +532,7 @@ router.post(
             primaryOwner ? primaryOwner.id : null,
             primaryOwner ? primaryOwner.nip : null,
             approvalStatus,
+            urgentFlag ? 1 : 0,
           ]
       );
       const docId = ins.insertId;
@@ -558,6 +562,7 @@ router.post(
               filename: req.file.originalname,
               approvalRequired,
               isSensitive: sensitiveFlag,
+              isUrgent: urgentFlag,
           }
       );
 
@@ -615,6 +620,7 @@ router.post(
         status:            initialStatus,
         approval_required: approvalRequired,
         is_sensitive:      sensitiveFlag,
+        is_urgent:         urgentFlag,
       });
     } catch (dbErr) {
       await conn.rollback();
