@@ -660,7 +660,11 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
             status: "Menunggu"
         },
         {
-            status: "Disetujui"
+            status: "Disetujui",
+            // FIX: simpan catatan approve ke new_value juga (sebelumnya hanya
+            // tertanam di teks `action`), supaya frontend bisa menampilkan
+            // popup "Komentar" tanpa perlu parsing string action.
+            catatan: comment || null
         }
     );
     await addAudit(
