@@ -23,6 +23,7 @@ const chatbotRoutes      = require("./routes/chatbotRoutes"); // ← BARU
 const ocrRoutes          = require("./routes/ocr"); // ← BARU: OCR via Gemini Vision
 const { checkConnection } = require("./services/supabaseStorage");
 const { verifySmtp }      = require("./services/emailService");
+const { warmupGemini }    = require("./services/geminiService"); // ← BARU: warm-up cold-start OCR
 
 const app = express();
 
@@ -177,5 +178,18 @@ app.listen(PORT, async () => {
   } catch (e) {
     storageStatus = { ok: false, message: e.message };
     console.warn("Supabase Storage check failed:", e.message);
+  }
+
+  // Gemini warm-up (non-fatal) — FIX: mencegah OCR gagal di percobaan
+  // pertama akibat cold-start TLS/DNS ke Gemini API. Lihat services/geminiService.js.
+  try {
+    const geminiStatus = await warmupGemini();
+    if (geminiStatus.ok) {
+      console.log(`Gemini OCR warm-up OK — ${geminiStatus.message}`);
+    } else {
+      console.warn(`Gemini OCR warm-up WARNING: ${geminiStatus.message}`);
+    }
+  } catch (e) {
+    console.warn("Gemini OCR warm-up failed:", e.message);
   }
 });
