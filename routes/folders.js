@@ -38,32 +38,70 @@ router.post("/", requirePermission("folders.manage"), async (req, res, next) => 
 });
 
 // PATCH /api/folders/:id
+// Mendukung rename/edit deskripsi (folder_name, description) DAN memindahkan
+// folder ke parent lain (parent_id) — dipakai oleh fitur "Pindahkan Folder".
+// parent_id sengaja dibedakan dari undefined vs null: null berarti "pindahkan
+// ke root", sedangkan tidak dikirim sama sekali berarti "jangan diubah".
 router.patch("/:id", requirePermission("folders.manage"), async (req, res, next) => {
   try {
-    const { folder_name, description } = req.body;
+    const folderId = req.params.id;
+    const { folder_name, description, parent_id } = req.body;
 
     const [[oldFolder]] = await pool.query(
-      "SELECT folder_name, description FROM folders WHERE folder_id = ?",
-      [req.params.id]
+      "SELECT folder_id, folder_name, description, parent_id FROM folders WHERE folder_id = ?",
+      [folderId]
     );
 
-    await pool.query(
-      "UPDATE folders SET folder_name = COALESCE(?, folder_name), description = COALESCE(?, description) WHERE folder_id = ? AND is_custom = 1",
-      [folder_name || null, description || null, req.params.id]
-    );
-
-    if (oldFolder) {
-      logActivity(pool, {
-        documentId: null,
-        userId: req.user.id,
-        action: `Mengubah folder "${oldFolder.folder_name}"`,
-        oldValue: oldFolder,
-        newValue: {
-          folder_name: folder_name || oldFolder.folder_name,
-          description: description || oldFolder.description,
-        },
-      }).catch((e) => console.error("[folders:patch] Gagal mencatat audit log:", e.message));
+    if (!oldFolder) {
+      return res.status(404).json({ error: "Folder tidak ditemukan" });
     }
+
+    // Cegah folder dipindahkan ke dirinya sendiri.
+    if (parent_id !== undefined && Number(parent_id) === Number(folderId)) {
+      return res.status(400).json({ error: "Folder tidak bisa dipindahkan ke dirinya sendiri" });
+    }
+
+    const fields = [];
+    const values = [];
+
+    if (folder_name !== undefined && folder_name !== null && folder_name !== "") {
+      fields.push("folder_name = ?");
+      values.push(folder_name);
+    }
+    if (description !== undefined && description !== null) {
+      fields.push("description = ?");
+      values.push(description);
+    }
+    if (parent_id !== undefined) {
+      fields.push("parent_id = ?");
+      values.push(parent_id === null || parent_id === "" ? null : parent_id);
+    }
+
+    if (fields.length === 0) {
+      return res.json({ message: "Tidak ada perubahan" });
+    }
+
+    values.push(folderId);
+    await pool.query(
+      `UPDATE folders SET ${fields.join(", ")} WHERE folder_id = ? AND is_custom = 1`,
+      values
+    );
+
+    const actionLabel = parent_id !== undefined && fields.length === 1
+      ? `Memindahkan folder "${oldFolder.folder_name}"`
+      : `Mengubah folder "${oldFolder.folder_name}"`;
+
+    logActivity(pool, {
+      documentId: null,
+      userId: req.user.id,
+      action: actionLabel,
+      oldValue: oldFolder,
+      newValue: {
+        folder_name: folder_name || oldFolder.folder_name,
+        description: description !== undefined ? description : oldFolder.description,
+        parent_id: parent_id !== undefined ? parent_id : oldFolder.parent_id,
+      },
+    }).catch((e) => console.error("[folders:patch] Gagal mencatat audit log:", e.message));
 
     res.json({ message: "Folder diperbarui" });
   } catch (e) { next(e); }
