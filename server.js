@@ -19,11 +19,12 @@ const roleRoutes         = require("./routes/roles");
 const approvalRoutes     = require("./routes/approvals");
 const dashboardRoutes    = require("./routes/dashboard");
 const presenceRoutes     = require("./routes/presence");
-const chatbotRoutes      = require("./routes/chatbotRoutes"); // ← BARU
-const ocrRoutes          = require("./routes/ocr"); // ← BARU: OCR via Gemini Vision
+const chatbotRoutes      = require("./routes/chatbot");
+const chatbotRoutes      = require("./routes/chatbotRoutes"); 
+const ocrRoutes          = require("./routes/ocr"); 
 const { checkConnection } = require("./services/supabaseStorage");
 const { verifySmtp }      = require("./services/emailService");
-const { warmupGemini }    = require("./services/geminiService"); // ← BARU: warm-up cold-start OCR
+const { warmupGemini }    = require("./services/geminiService"); 
 
 const app = express();
 
@@ -134,8 +135,9 @@ app.use("/api/roles",         roleRoutes);
 app.use("/api/approvals",     approvalRoutes);
 app.use("/api/dashboard",     dashboardRoutes);
 app.use("/api/presence",      presenceRoutes);
-app.use("/api/chatbot",       chatbotRoutes); // ← BARU
-app.use("/api/ocr",           ocrRoutes); // ← BARU: OCR via Gemini Vision
+app.use("/api/chatbot",       chatbotRoutes);
+app.use("/api/chatbot",       chatbotRoutes); 
+app.use("/api/ocr",           ocrRoutes); 
 
 // 404
 app.use((req, res) => res.status(404).json({ error: "Not Found", path: req.path }));

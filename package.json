@@ -12,10 +12,8 @@
     "db:add-must-change-password": "node scripts/add-must-change-password.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
     "@google/genai": "^2.10.0",
     "@supabase/supabase-js": "^2.45.4",
-    "axios": "^1.16.1",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
