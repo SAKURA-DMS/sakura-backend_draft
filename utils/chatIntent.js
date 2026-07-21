@@ -2,16 +2,6 @@
  * utils/chatIntent.js
  *
  * Intent detector untuk navigasi SAKURA AI.
- *
- * Tujuan:
- * - Navigasi ditentukan secara deterministik, bukan diserahkan ke Gemini.
- * - Tetap menghasilkan tombol navigasi seperti UI chatbot sebelumnya.
- * - Pertanyaan statistik/search/help tidak salah masuk ke navigation.
- * - Mendukung perintah natural seperti:
- *   "antar saya ke upload"
- *   "antar ke log"
- *   "buka arsip"
- *   "bawa saya ke dashboard"
  */
 
 const ROUTE_MAP = {
@@ -26,6 +16,7 @@ const ROUTE_MAP = {
   profile: { keys: ["profil", "profile"], path: "/profile", label: "Buka Profil" },
   home: { keys: ["home", "beranda"], path: "/home", label: "Buka Beranda" },
   trash: { keys: ["sampah", "trash", "kotak sampah"], path: "/trash", label: "Buka Kotak Sampah" },
+  login: { keys: ["login", "log in", "masuk akun", "halaman login"], path: "/login", label: "Buka halaman Login" },
 };
 
 const FOLDER_MAP = {
@@ -48,12 +39,10 @@ function containsKeyword(text, keyword) {
   if (!text || !keyword) return false;
   const normalizedText = normalize(text);
   const normalizedKeyword = normalize(keyword);
-
   if (/^[a-z0-9]+$/i.test(normalizedKeyword)) {
     const regex = new RegExp(`\\b${escapeRegex(normalizedKeyword)}\\b`, "i");
     return regex.test(normalizedText);
   }
-
   return normalizedText.includes(normalizedKeyword);
 }
 
@@ -89,48 +78,25 @@ function isInformationQuestion(lower) {
 
 function classifyIntent(message) {
   const lower = normalize(message);
-
   if (!lower) return { type: "information" };
-
   const navigationRequested = hasNavigationVerb(lower);
 
   if (navigationRequested) {
     const folderMatch = findFolderMatch(lower);
     if (folderMatch) {
-      return {
-        type: "folder",
-        folder: folderMatch.folderKey,
-        link: {
-          label: folderMatch.config.label,
-          path: folderMatch.config.path,
-        },
-      };
+      return { type: "folder", folder: folderMatch.folderKey, link: { label: folderMatch.config.label, path: folderMatch.config.path } };
     }
   }
 
   if (navigationRequested) {
     const routeMatch = findRouteMatch(lower);
     if (routeMatch) {
-      return {
-        type: "navigation",
-        route: routeMatch.routeKey,
-        link: {
-          label: routeMatch.config.label,
-          path: routeMatch.config.path,
-        },
-      };
+      return { type: "navigation", route: routeMatch.routeKey, link: { label: routeMatch.config.label, path: routeMatch.config.path } };
     }
   }
 
-  if (isInformationQuestion(lower)) {
-    return { type: "information" };
-  }
-
+  if (isInformationQuestion(lower)) return { type: "information" };
   return { type: "information" };
 }
 
-module.exports = {
-  ROUTE_MAP,
-  FOLDER_MAP,
-  classifyIntent,
-};
+module.exports = { ROUTE_MAP, FOLDER_MAP, classifyIntent };

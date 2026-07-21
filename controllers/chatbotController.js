@@ -106,11 +106,27 @@ function isSearchIntent(message) {
     /carikan\s+dokumen/i.test(lower) ||
     /cari\s+arsip/i.test(lower) ||
     /temukan\s+dokumen/i.test(lower) ||
-    /dokumen\s+bernama/i.test(lower) ||
+    /dokumen\s+(dengan\s+nama|bernama)/i.test(lower) ||
     /detail\s+dokumen/i.test(lower) ||
     /^ada\s+.+\s+(ga|gak|nggak|tidak|kah)$/i.test(lower) ||
     /\b(ijazah|sertifikat|surat|buku induk|skl|transkrip)\b/i.test(lower)
   );
+}
+
+function isGenericSearchRequest(message) {
+  const lower = normalize(message).replace(/[?.!]+$/g, "").trim();
+
+  return [
+    "cari dokumen",
+    "mencari dokumen",
+    "saya ingin mencari dokumen",
+    "saya mau mencari dokumen",
+    "aku ingin mencari dokumen",
+    "aku mau mencari dokumen",
+    "tolong cari dokumen",
+    "carikan dokumen",
+    "cari arsip",
+  ].includes(lower);
 }
 
 /**
@@ -143,6 +159,9 @@ function extractSearchKeyword(message) {
     /^temukan\s+dokumen\s+/i,
     /^temukan\s+/i,
 
+    /^adakah\s+dokumen\s+dengan\s+nama\s+/i,
+    /^ada\s+dokumen\s+dengan\s+nama\s+/i,
+    /^dokumen\s+dengan\s+nama\s+/i,
     /^dokumen\s+bernama\s+/i,
     /^detail\s+dokumen\s+/i,
   ];
@@ -385,11 +404,11 @@ function handleHelp(res) {
     "",
     "Menu utama yang dapat digunakan:",
     "",
-    "• Dashboard — melihat ringkasan dan statistik dokumen.",
-    "• Upload — menambahkan dokumen baru.",
-    "• Persetujuan — memeriksa dokumen yang membutuhkan persetujuan.",
-    "• Arsip — mencari dan melihat dokumen yang tersimpan.",
-    "• Sampah — memulihkan atau menghapus permanen dokumen.",
+    "• Dashboard: melihat ringkasan dan statistik dokumen.",
+    "• Upload: menambahkan dokumen baru.",
+    "• Persetujuan: memeriksa dokumen yang membutuhkan persetujuan.",
+    "• Arsip: mencari dan melihat dokumen yang tersimpan.",
+    "• Sampah: memulihkan atau menghapus permanen dokumen.",
     "",
     "Pilih halaman yang ingin dibuka melalui tombol di bawah ini.",
   ].join("\n");
@@ -674,7 +693,7 @@ async function handleDocumentSearch(
         .map((doc) => {
           return (
             `• ${doc.judul}\n` +
-            `  ${doc.nomorDokumen} — ${doc.status}`
+            `  ${doc.nomorDokumen}: ${doc.status}`
           );
         })
         .join("\n");
@@ -737,9 +756,9 @@ async function handleGeminiFallback(
      */
 
     const systemPrompt = `Kamu adalah SAKURA AI Assistant untuk sistem manajemen arsip digital SMP Negeri 4 Cikarang Barat.
-Jawab dalam Bahasa Indonesia yang singkat, natural, rapi, dan mudah dibaca di chatbot kecil.
+Jawab dalam Bahasa Indonesia yang singkat, natural, ramah, dan mudah dibaca di chatbot kecil.\nGunakan teks biasa. Jangan gunakan Markdown seperti tanda **, heading, atau format tebal. Jangan gunakan em dash. Gunakan kata "kamu", bukan "Anda". Jangan selalu membuka jawaban dengan "Halo!" atau pembuka generik.
 Kamu memahami fitur SAKURA: Dashboard, Upload Dokumen, Scan Dokumen, Arsip, Persetujuan, Pengguna, Role, Log Aktivitas, Notifikasi, Kotak Sampah, Profil, dan Pengaturan.
-Jangan mengarang data dokumen atau statistik. Jangan memberikan kredensial atau informasi teknis sensitif.
+Jangan mengarang data dokumen, statistik, lokasi tombol, atau fitur yang tidak diberikan sistem. Jangan memberikan kredensial atau informasi teknis sensitif.
 Jika pertanyaan berkaitan dengan cara menggunakan SAKURA, jelaskan berdasarkan fitur-fitur tersebut dan jangan mengatakan bahwa kamu tidak tahu.`;
 
     const historyText = Array.isArray(history)
@@ -771,6 +790,13 @@ Jika pertanyaan berkaitan dengan cara menggunakan SAKURA, jelaskan berdasarkan f
       reply =
         "Saya siap membantu seputar penggunaan sistem SAKURA.";
     }
+
+    reply = String(reply)
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/__(.*?)__/g, "$1")
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/[—–]/g, "-")
+      .trim();
 
     return sendReply(res, {
       reply,
@@ -903,7 +929,7 @@ async function handleChat(req, res) {
 
     /*
      * ========================================================
-     * CONTEXT FOLLOW-UP — "antar aku ke sana", "buka itu", dll.
+     * CONTEXT FOLLOW-UP: "antar aku ke sana", "buka itu", dll.
      * ========================================================
      */
     if (isContextualNavigationRequest(cleanMessage)) {
@@ -920,7 +946,7 @@ async function handleChat(req, res) {
 
     /*
      * ========================================================
-     * PRIORITY 1 — STATISTICS
+     * PRIORITY 1: STATISTICS
      * ========================================================
      *
      * "Tampilkan statistik dokumen"
@@ -937,7 +963,7 @@ async function handleChat(req, res) {
 
     /*
      * ========================================================
-     * PRIORITY 2 — HELP
+     * PRIORITY 2: HELP
      * ========================================================
      */
 
@@ -947,11 +973,19 @@ async function handleChat(req, res) {
 
     /*
      * ========================================================
-     * PRIORITY 3 — DOCUMENT SEARCH
+     * PRIORITY 3: DOCUMENT SEARCH
      * ========================================================
      */
 
     if (isSearchIntent(cleanMessage)) {
+      if (isGenericSearchRequest(cleanMessage)) {
+        return sendReply(res, {
+          reply: "Dokumen apa yang ingin kamu cari? Ketik judul, nama, nomor dokumen, atau kata kuncinya.",
+          type: "search_prompt",
+          links: [],
+        });
+      }
+
       return await handleDocumentSearch(
         res,
         cleanMessage
@@ -960,7 +994,7 @@ async function handleChat(req, res) {
 
     /*
      * ========================================================
-     * PRIORITY 4 — NAVIGATION
+     * PRIORITY 4: NAVIGATION
      * ========================================================
      */
 
@@ -990,7 +1024,7 @@ async function handleChat(req, res) {
 
     /*
      * ========================================================
-     * PRIORITY 5 — GEMINI
+     * PRIORITY 5: GEMINI
      * ========================================================
      *
      * Hanya percakapan bebas yang sampai sini.
