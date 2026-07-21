@@ -108,6 +108,7 @@ function isSearchIntent(message) {
     /temukan\s+dokumen/i.test(lower) ||
     /dokumen\s+bernama/i.test(lower) ||
     /detail\s+dokumen/i.test(lower) ||
+    /^ada\s+.+\s+(ga|gak|nggak|tidak|kah)$/i.test(lower) ||
     /\b(ijazah|sertifikat|surat|buku induk|skl|transkrip)\b/i.test(lower)
   );
 }
@@ -130,6 +131,8 @@ function extractSearchKeyword(message) {
     /^tolong\s+/i,
     /^saya\s+ingin\s+/i,
     /^aku\s+mau\s+/i,
+
+    /^ada\s+/i,
 
     /^cari\s+dokumen\s+/i,
     /^carikan\s+dokumen\s+/i,
@@ -160,6 +163,7 @@ function extractSearchKeyword(message) {
   }
 
   return keyword
+    .replace(/\s+(ga|gak|nggak|tidak|kah)\s*[?.!]*$/i, "")
     .replace(/[?.!]+$/g, "")
     .trim();
 }
@@ -634,7 +638,7 @@ async function handleDocumentSearch(
 
       return sendReply(res, {
         reply:
-          `Detail dokumen: ${doc.judul}`,
+          `Ada. Saya menemukan dokumen ${doc.judul}.\n\nNomor: ${doc.nomorDokumen}\nStatus: ${doc.status}${doc.kategori && doc.kategori !== "-" ? `\nKategori: ${doc.kategori}` : ""}`,
 
         type: "document_detail",
 
@@ -812,6 +816,66 @@ Jika pertanyaan berkaitan dengan cara menggunakan SAKURA, jelaskan berdasarkan f
 }
 
 /* ============================================================
+ * CONTEXTUAL FOLLOW-UP NAVIGATION
+ * ============================================================
+ *
+ * Hanya menangani referensi ke konteks sebelumnya, misalnya:
+ * - "coba antar aku ke sana"
+ * - "buka itu"
+ * - "antar ke situ"
+ * - "buka yang tadi"
+ *
+ * Tidak mengubah intent navigasi biasa.
+ */
+function isContextualNavigationRequest(message) {
+  const lower = normalize(message);
+
+  const hasNavVerb =
+    /\b(buka|bukakan|antar|antarkan|bawa|bawakan|arahkan|pergi|pindah|masuk|menuju|navigasi)\b/i.test(lower);
+
+  const hasContextReference =
+    /\b(sana|situ|itu|tadi|yang tadi|dokumen tadi|dokumen itu|halaman tadi|halaman itu)\b/i.test(lower);
+
+  return hasNavVerb && hasContextReference;
+}
+
+function getLastContextLink(history = []) {
+  if (!Array.isArray(history)) {
+    return null;
+  }
+
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const item = history[i];
+
+    if (!item || item.role !== "assistant") {
+      continue;
+    }
+
+    const links = Array.isArray(item.links)
+      ? item.links
+      : item.link
+      ? [item.link]
+      : [];
+
+    const validLink = links.find(
+      (link) => link && link.path
+    );
+
+    if (validLink) {
+      return {
+        label:
+          validLink.label ||
+          "Buka halaman",
+        path:
+          validLink.path,
+      };
+    }
+  }
+
+  return null;
+}
+
+/* ============================================================
  * MAIN CHAT HANDLER
  * ============================================================
  */
@@ -836,6 +900,23 @@ async function handleChat(req, res) {
 
     const cleanMessage =
       message.trim();
+
+    /*
+     * ========================================================
+     * CONTEXT FOLLOW-UP — "antar aku ke sana", "buka itu", dll.
+     * ========================================================
+     */
+    if (isContextualNavigationRequest(cleanMessage)) {
+      const previousLink = getLastContextLink(history);
+
+      if (previousLink) {
+        return sendReply(res, {
+          reply: "Tentu. Kamu bisa membukanya melalui tombol di bawah ini.",
+          type: "navigation",
+          links: [previousLink],
+        });
+      }
+    }
 
     /*
      * ========================================================
