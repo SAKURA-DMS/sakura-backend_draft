@@ -107,7 +107,8 @@ function isSearchIntent(message) {
     /cari\s+arsip/i.test(lower) ||
     /temukan\s+dokumen/i.test(lower) ||
     /dokumen\s+bernama/i.test(lower) ||
-    /detail\s+dokumen/i.test(lower)
+    /detail\s+dokumen/i.test(lower) ||
+    /\b(ijazah|sertifikat|surat|buku induk|skl|transkrip)\b/i.test(lower)
   );
 }
 
@@ -731,9 +732,23 @@ async function handleGeminiFallback(
      * tidak melewati Gemini.
      */
 
+    const systemPrompt = `Kamu adalah SAKURA AI Assistant untuk sistem manajemen arsip digital SMP Negeri 4 Cikarang Barat.
+Jawab dalam Bahasa Indonesia yang singkat, natural, rapi, dan mudah dibaca di chatbot kecil.
+Kamu memahami fitur SAKURA: Dashboard, Upload Dokumen, Scan Dokumen, Arsip, Persetujuan, Pengguna, Role, Log Aktivitas, Notifikasi, Kotak Sampah, Profil, dan Pengaturan.
+Jangan mengarang data dokumen atau statistik. Jangan memberikan kredensial atau informasi teknis sensitif.
+Jika pertanyaan berkaitan dengan cara menggunakan SAKURA, jelaskan berdasarkan fitur-fitur tersebut dan jangan mengatakan bahwa kamu tidak tahu.`;
+
+    const historyText = Array.isArray(history)
+      ? history.slice(-6).map((item) => `${item?.role === "assistant" ? "Assistant" : "User"}: ${String(item?.content || "")}`).join("\n")
+      : "";
+
+    const userMessage = historyText
+      ? `${historyText}\nUser: ${message}`
+      : message;
+
     const result = await askGemini(
-      message,
-      history
+      systemPrompt,
+      userMessage
     );
 
     let reply = "";

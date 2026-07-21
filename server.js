@@ -19,7 +19,7 @@ const roleRoutes         = require("./routes/roles");
 const approvalRoutes     = require("./routes/approvals");
 const dashboardRoutes    = require("./routes/dashboard");
 const presenceRoutes     = require("./routes/presence");
-const chatbotRoutes      = require("./routes/chatbot");
+const chatbotRoutes      = require("./routes/chatbotRoutes");
 const ocrRoutes          = require("./routes/ocr");
 
 const { checkConnection } = require("./services/supabaseStorage");
