@@ -507,7 +507,7 @@ Jangan mengarang data yang tidak tersedia.
 // ============================================================
 
 router.post(
-  "/message",
+  "/",
   authRequired,
   async (req, res) => {
     try {
