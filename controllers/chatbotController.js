@@ -3,7 +3,7 @@ const { askGemini } = require("../services/geminiService");
 const { classifyIntent } = require("../utils/chatIntent");
 
 // ============================================================
-// CACHE
+// CACHE GEMINI
 // ============================================================
 
 const cache = new Map();
@@ -35,10 +35,6 @@ function setCache(key, value) {
 
 // ============================================================
 // SEARCH SESSION
-//
-// Menyimpan bahwa user baru saja menekan/mengatakan
-// "Cari dokumen", sehingga pesan berikutnya seperti
-// "Ijazah Iqbal Fachrozi" tetap dianggap query pencarian.
 // ============================================================
 
 const searchSessions = new Map();
@@ -67,30 +63,39 @@ function clearSearchSession(userId) {
 }
 
 // ============================================================
-// RATE LIMIT PER USER
+// RATE LIMIT
+//
+// HANYA untuk Gemini.
+// Search, statistics, help, navigation TIDAK terkena rate limit.
 // ============================================================
 
-const userLastRequest = new Map();
-const USER_RATE_MS = 1200;
+const userLastGeminiRequest = new Map();
+const GEMINI_USER_RATE_MS = 1200;
 
-function isUserRateLimited(userId) {
-  const last = userLastRequest.get(userId);
+function isGeminiRateLimited(userId) {
+  const key = String(userId);
+  const last = userLastGeminiRequest.get(key);
 
   return Boolean(
     last &&
-    Date.now() - last < USER_RATE_MS
+    Date.now() - last < GEMINI_USER_RATE_MS
   );
 }
 
-function markUserRequest(userId) {
-  userLastRequest.set(userId, Date.now());
+function markGeminiRequest(userId) {
+  const key = String(userId);
 
-  if (userLastRequest.size > 500) {
+  userLastGeminiRequest.set(
+    key,
+    Date.now()
+  );
+
+  if (userLastGeminiRequest.size > 500) {
     const cutoff = Date.now() - 60000;
 
-    for (const [key, value] of userLastRequest) {
+    for (const [storedKey, value] of userLastGeminiRequest) {
       if (value < cutoff) {
-        userLastRequest.delete(key);
+        userLastGeminiRequest.delete(storedKey);
       }
     }
   }
@@ -108,18 +113,18 @@ function normalizeText(value = "") {
 }
 
 function stripFences(raw) {
-  if (!raw || typeof raw !== "string") return raw;
+  if (!raw || typeof raw !== "string") {
+    return raw;
+  }
 
   return raw
     .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```\s*$/, "")
+    .replace(/\s*```\s*$/i, "")
     .trim();
 }
 
 function cleanGeminiText(text = "") {
   return String(text)
-    // Frontend saat ini bukan markdown renderer.
-    // Hilangkan markdown agar **Dashboard** tidak tampil mentah.
     .replace(/\*\*(.*?)\*\*/g, "$1")
     .replace(/__(.*?)__/g, "$1")
     .replace(/^#{1,6}\s+/gm, "")
@@ -135,32 +140,45 @@ function friendlyError(err) {
   }
 
   if (msg.includes("GEMINI_403")) {
-    return "API Key tidak memiliki izin akses Gemini.";
+    return "API Key Gemini tidak memiliki izin yang diperlukan.";
   }
 
   if (msg.includes("GEMINI_429")) {
-    return "Layanan AI sedang sibuk. Silakan coba lagi dalam beberapa detik.";
+    return "Layanan AI sedang menerima banyak permintaan. Silakan coba lagi sebentar.";
   }
 
   if (
     msg.includes("GEMINI_TIMEOUT") ||
     msg.includes("Timeout")
   ) {
-    return "AI membutuhkan waktu lebih lama. Silakan coba lagi.";
+    return "AI membutuhkan waktu lebih lama untuk merespons. Silakan coba lagi.";
   }
 
   return "Terjadi kesalahan saat menghubungi AI. Silakan coba lagi.";
 }
 
 // ============================================================
-// ROLE HELPERS
+// ROLE
 // ============================================================
 
+function getRoleName(user) {
+  return String(
+    user?.role ||
+    user?.role_name ||
+    ""
+  ).toLowerCase();
+}
+
 function isGuru(user) {
-  return String(user?.role || "").toLowerCase() === "guru";
+  return getRoleName(user) === "guru";
 }
 
 function getOwnerFilter(user, alias = "d") {
+  /*
+   * Guru hanya melihat dokumen miliknya sendiri.
+   * Operator/TU, Kepsek, Admin melihat dokumen sesuai akses sistem.
+   */
+
   if (isGuru(user)) {
     return {
       sql: `AND ${alias}.uploaded_by = ?`,
@@ -184,6 +202,7 @@ function isStatisticsIntent(text) {
   return (
     /\b(statistik|statistic|stats)\b/.test(lower) ||
     /tampilkan statistik dokumen/.test(lower) ||
+    /lihat statistik dokumen/.test(lower) ||
     /berapa (jumlah|total) dokumen/.test(lower) ||
     /ringkasan dokumen/.test(lower)
   );
@@ -195,9 +214,10 @@ function isHelpIntent(text) {
   return (
     /bagaimana cara menggunakan sakura/.test(lower) ||
     /cara menggunakan sakura/.test(lower) ||
+    /cara pakai sakura/.test(lower) ||
     /bantuan penggunaan/.test(lower) ||
     /panduan penggunaan/.test(lower) ||
-    /cara pakai sakura/.test(lower)
+    /fitur sakura/.test(lower)
   );
 }
 
@@ -218,7 +238,9 @@ function isExplicitDocumentSearch(text) {
   const lower = normalizeText(text);
 
   return (
-    /^(cari|carikan|temukan|tolong cari|tolong carikan)\b/.test(lower) ||
+    /^(cari|carikan|temukan|tolong cari|tolong carikan)\b/.test(
+      lower
+    ) ||
     /\bcari dokumen\b/.test(lower) ||
     /\btemukan dokumen\b/.test(lower)
   );
@@ -235,7 +257,7 @@ function extractSearchQuery(text) {
 }
 
 // ============================================================
-// DATABASE: STATISTICS
+// STATISTICS
 // ============================================================
 
 async function getStatistics(user) {
@@ -310,7 +332,7 @@ async function getStatistics(user) {
 
 function buildStatisticsAnswer(stats) {
   return [
-    "Berikut statistik dokumen saat ini:",
+    "Berikut ringkasan statistik dokumen saat ini:",
     "",
     `• Total dokumen: ${stats.total}`,
     `• Menunggu persetujuan: ${stats.menunggu}`,
@@ -322,12 +344,12 @@ function buildStatisticsAnswer(stats) {
     `• 7 hari terakhir: ${stats.minggu_ini}`,
     `• Bulan ini: ${stats.bulan_ini}`,
     "",
-    "Kamu juga bisa melihat grafik dan ringkasan statistik secara lebih lengkap melalui Dashboard.",
+    "Untuk melihat grafik dan statistik lebih lengkap, buka Dashboard melalui tombol di bawah.",
   ].join("\n");
 }
 
 // ============================================================
-// DATABASE: DOCUMENT SEARCH
+// DOCUMENT SEARCH
 // ============================================================
 
 async function searchDocuments(query, user) {
@@ -339,9 +361,6 @@ async function searchDocuments(query, user) {
 
   const owner = getOwnerFilter(user);
 
-  // Gunakan query penuh + kata-kata penting.
-  // Ini membuat "Ijazah Iqbal Fachrozi" bisa menemukan judul
-  // secara langsung tanpa tergantung kata "cari".
   const words = search
     .replace(/[^\p{L}\p{N}\s./_-]/gu, " ")
     .split(/\s+/)
@@ -359,8 +378,13 @@ async function searchDocuments(query, user) {
   ];
 
   for (const word of words.slice(0, 6)) {
-    conditions.push("LOWER(d.judul) LIKE LOWER(?)");
-    params.push(`%${word}%`);
+    conditions.push(
+      "LOWER(d.judul) LIKE LOWER(?)"
+    );
+
+    params.push(
+      `%${word}%`
+    );
   }
 
   const [rows] = await pool.query(
@@ -371,6 +395,7 @@ async function searchDocuments(query, user) {
         d.nomor_dokumen,
         d.status,
         d.created_at,
+        d.uploaded_by,
         u.nama AS uploader
 
       FROM documents d
@@ -419,87 +444,104 @@ function buildSearchAnswer(query, documents) {
     ].join("\n");
   }
 
-  const lines = [
-    `Ditemukan ${documents.length} dokumen yang cocok dengan pencarian "${query}":`,
+  if (documents.length === 1) {
+    const doc = documents[0];
+
+    return [
+      `Ditemukan dokumen "${doc.judul}".`,
+      "",
+      `Nomor dokumen: ${doc.nomor_dokumen || "-"}`,
+      `Status: ${doc.status || "-"}`,
+      doc.uploader
+        ? `Diunggah oleh: ${doc.uploader}`
+        : null,
+      "",
+      "Gunakan tombol di bawah untuk membuka dokumen.",
+    ]
+      .filter((line) => line !== null)
+      .join("\n");
+  }
+
+  return [
+    `Ditemukan ${documents.length} dokumen yang cocok dengan pencarian "${query}".`,
     "",
-  ];
-
-  documents.forEach((doc, index) => {
-    lines.push(`${index + 1}. ${doc.judul}`);
-
-    if (doc.nomor_dokumen) {
-      lines.push(`   Nomor: ${doc.nomor_dokumen}`);
-    }
-
-    lines.push(`   Status: ${doc.status || "-"}`);
-
-    if (doc.uploader) {
-      lines.push(`   Diunggah oleh: ${doc.uploader}`);
-    }
-
-    if (index !== documents.length - 1) {
-      lines.push("");
-    }
-  });
-
-  lines.push("");
-  lines.push(
-    "Pilih tombol dokumen di bawah untuk melihat detailnya."
-  );
-
-  return lines.join("\n");
+    "Pilih salah satu dokumen melalui tombol di bawah untuk melihat detailnya.",
+  ].join("\n");
 }
 
+/*
+ * PENTING:
+ *
+ * Semua status tetap dibuatkan tombol:
+ * - Diarsipkan
+ * - Ditolak
+ * - Menunggu
+ *
+ * Jadi Ijazah Iqbal yang Ditolak TETAP ditemukan.
+ */
 function buildDocumentLinks(documents) {
   return documents
     .filter((doc) => doc?.id)
-    .map((doc) => ({
-      label: `Buka dokumen: ${doc.judul} (${doc.status || "Tanpa status"})`,
-      path: `/documents/${doc.id}`,
-    }));
+    .map((doc) => {
+      let label = `Buka dokumen: ${doc.judul}`;
+
+      /*
+       * Pertahankan gaya screenshot lama:
+       * dokumen diarsipkan dapat diberi label Buka arsip.
+       */
+      if (
+        String(doc.status || "").toLowerCase() ===
+        "diarsipkan"
+      ) {
+        label = `Buka arsip: ${doc.judul}`;
+      }
+
+      return {
+        label,
+        path: `/documents/${doc.id}`,
+        documentId: doc.id,
+        status: doc.status || null,
+      };
+    });
 }
 
 // ============================================================
-// HELP / GUIDE
+// HELP / CARA MENGGUNAKAN
 // ============================================================
 
 function buildHelpAnswer(user) {
-  const role = String(user?.role || "");
+  const role = getRoleName(user);
 
   const lines = [
     "SAKURA digunakan untuk mengelola arsip dokumen sekolah secara digital.",
     "",
-    "Fitur utama yang dapat digunakan:",
+    "Menu utama:",
     "",
     "• Dashboard",
-    "Melihat ringkasan jumlah dokumen, status dokumen, dan grafik statistik.",
+    "Melihat ringkasan dokumen dan grafik statistik.",
     "",
-    "• Upload Dokumen",
-    "Menambahkan dokumen baru ke sistem untuk diproses sesuai alur persetujuan.",
+    "• Upload",
+    "Menambahkan dokumen baru ke sistem.",
     "",
-    "• Arsip Digital",
-    "Mencari dan membuka dokumen yang telah tersimpan di sistem.",
+    "• Arsip",
+    "Mencari dan membuka dokumen yang tersimpan.",
     "",
     "• Persetujuan",
-    "Memeriksa dokumen yang menunggu proses persetujuan sesuai hak akses pengguna.",
+    "Memproses dokumen yang menunggu persetujuan sesuai hak akses.",
     "",
-    "• Notifikasi",
-    "Melihat pemberitahuan ketika terdapat perubahan atau proses pada dokumen.",
+    "Gunakan tombol di bawah untuk membuka halaman yang dibutuhkan.",
   ];
 
   if (
-    /admin|operator|tu|kepala/i.test(role)
+    /admin|operator|tu|kepala/.test(role)
   ) {
-    lines.push(
+    lines.splice(
+      lines.length - 1,
+      0,
       "",
-      "Beberapa menu tambahan tersedia sesuai peran akun, seperti manajemen pengguna, log aktivitas, atau pengelolaan persetujuan."
+      "Menu tambahan seperti Pengguna, Peran, dan Log Aktivitas tersedia sesuai hak akses akun."
     );
   }
-
-  lines.push(
-    "",
-    "Kamu bisa memilih salah satu tombol di bawah untuk membuka halaman yang dibutuhkan."
-  );
 
   return lines.join("\n");
 }
@@ -515,15 +557,15 @@ function buildHelpLinks(user) {
       path: "/upload",
     },
     {
-      label: "Buka Arsip",
+      label: "Buka halaman Arsip",
       path: "/archive",
     },
   ];
 
-  const role = String(user?.role || "");
+  const role = getRoleName(user);
 
   if (
-    /admin|operator|tu|kepala/i.test(role)
+    /admin|operator|tu|kepala/.test(role)
   ) {
     links.push({
       label: "Buka Persetujuan",
@@ -535,7 +577,88 @@ function buildHelpLinks(user) {
 }
 
 // ============================================================
-// GEMINI CONTEXT
+// NAVIGATION RESPONSE
+// ============================================================
+
+function buildNavigationAnswer(intent) {
+  const route = intent?.route;
+
+  switch (route) {
+    case "upload":
+      return "Tentu. Gunakan tombol di bawah untuk membuka halaman Upload dan menambahkan dokumen baru.";
+
+    case "dashboard":
+      return "Tentu. Gunakan tombol di bawah untuk membuka Dashboard dan melihat ringkasan serta grafik statistik dokumen.";
+
+    case "approval":
+      return "Tentu. Gunakan tombol di bawah untuk membuka halaman Persetujuan.";
+
+    case "archive":
+      return "Tentu. Gunakan tombol di bawah untuk membuka halaman Arsip dan melihat dokumen yang tersimpan.";
+
+    case "users":
+      return "Tentu. Gunakan tombol di bawah untuk membuka Manajemen Pengguna.";
+
+    case "roles":
+      return "Tentu. Gunakan tombol di bawah untuk membuka Manajemen Peran.";
+
+    case "logs":
+      return "Tentu. Gunakan tombol di bawah untuk membuka Log Aktivitas.";
+
+    case "settings":
+      return "Tentu. Gunakan tombol di bawah untuk membuka Pengaturan.";
+
+    case "profile":
+      return "Tentu. Gunakan tombol di bawah untuk membuka Profil.";
+
+    case "home":
+      return "Tentu. Gunakan tombol di bawah untuk membuka Beranda.";
+
+    case "trash":
+      return "Tentu. Gunakan tombol di bawah untuk membuka Kotak Sampah.";
+
+    default:
+      if (intent?.type === "folder") {
+        return "Tentu. Gunakan tombol di bawah untuk membuka folder dokumen yang diminta.";
+      }
+
+      return "Tentu. Gunakan tombol di bawah untuk membuka halaman yang kamu butuhkan.";
+  }
+}
+
+function getNavigationResponse(question) {
+  try {
+    const intent = classifyIntent(question);
+
+    if (
+      !intent ||
+      intent.type === "information" ||
+      !intent.link
+    ) {
+      return null;
+    }
+
+    return {
+      answer: buildNavigationAnswer(intent),
+      links: [
+        {
+          label: intent.link.label,
+          path: intent.link.path,
+        },
+      ],
+    };
+  } catch (error) {
+    console.error(
+      "[Chatbot] navigation error:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+// ============================================================
+// GEMINI SYSTEM PROMPT
 // ============================================================
 
 const BASE_SYSTEM_PROMPT = `
@@ -544,37 +667,31 @@ Kamu adalah SAKURA AI, asisten resmi sistem SAKURA
 sistem manajemen arsip digital SMP Negeri 4 Cikarang Barat.
 
 TUGAS:
-- Membantu pengguna memahami penggunaan sistem SAKURA.
-- Menjawab pertanyaan mengenai dokumen berdasarkan DATA SISTEM
-  yang diberikan backend.
-- Membantu navigasi dan penggunaan fitur SAKURA.
+- Membantu pengguna memahami sistem SAKURA.
+- Menjawab pertanyaan umum mengenai penggunaan sistem.
+- Menggunakan DATA SISTEM yang diberikan backend jika relevan.
 
-ATURAN:
+ATURAN PENTING:
 1. Gunakan Bahasa Indonesia yang sopan, ramah, jelas, dan ringkas.
-2. Jangan mengarang nama dokumen, jumlah dokumen, status,
-   pengguna, atau informasi database.
-3. Jika DATA SISTEM tidak menyediakan fakta tertentu,
-   katakan bahwa informasi tersebut tidak tersedia.
-4. Jangan pernah mengaku sudah membuka halaman.
-5. Jika pengguna meminta navigasi, jelaskan singkat tujuan halaman.
-   Tombol navigasi akan dibuat oleh backend.
-6. Jangan gunakan Markdown seperti **tebal**, heading #,
-   tabel markdown, atau code fence.
-7. Gunakan bullet "•" jika perlu.
-8. Jangan menampilkan path teknis seperti /upload dalam jawaban
-   kecuali benar-benar diperlukan.
-9. Jangan memberikan kredensial, API key, source code sensitif,
-   atau data keamanan internal.
+2. Jangan mengarang nama dokumen, status, jumlah dokumen, atau data pengguna.
+3. Jangan mengatakan dokumen tidak ada jika backend tidak memberikan data pencarian.
+4. Jangan mengaku telah membuka atau memindahkan halaman.
+5. Navigasi dan tombol dibuat oleh backend, bukan oleh kamu.
+6. Jangan membuat URL atau path navigasi sendiri.
+7. Jangan menggunakan Markdown seperti **tebal**, heading #, tabel, atau code fence.
+8. Gunakan bullet • jika diperlukan.
+9. Jangan memberikan API key, kredensial, atau informasi keamanan internal.
 
 FITUR SAKURA:
 • Dashboard: ringkasan dan grafik statistik dokumen.
 • Upload: menambahkan dokumen baru.
 • Arsip: melihat dan mencari dokumen.
 • Persetujuan: memproses dokumen sesuai hak akses.
-• Notifikasi: pemberitahuan aktivitas/status.
+• Notifikasi: pemberitahuan aktivitas dan perubahan status.
 • Profil: pengelolaan profil pengguna.
 • Pengguna dan Peran: tersedia sesuai hak akses.
 • Log Aktivitas: audit trail aktivitas sistem.
+• Kotak Sampah: dokumen yang dihapus sementara.
 `.trim();
 
 async function buildGeneralContext(user) {
@@ -582,7 +699,11 @@ async function buildGeneralContext(user) {
     const stats = await getStatistics(user);
 
     return [
-      `Peran pengguna saat ini: ${user?.role || "Tidak diketahui"}`,
+      `Peran pengguna saat ini: ${
+        user?.role ||
+        user?.role_name ||
+        "Tidak diketahui"
+      }`,
       "",
       "Statistik database saat ini:",
       `Total: ${stats.total}`,
@@ -597,13 +718,19 @@ async function buildGeneralContext(user) {
     );
 
     return `Peran pengguna saat ini: ${
-      user?.role || "Tidak diketahui"
+      user?.role ||
+      user?.role_name ||
+      "Tidak diketahui"
     }`;
   }
 }
 
-async function askGeminiSafely(question, user) {
-  const context = await buildGeneralContext(user);
+async function askGeminiSafely(
+  question,
+  user
+) {
+  const context =
+    await buildGeneralContext(user);
 
   const systemPrompt = [
     BASE_SYSTEM_PROMPT,
@@ -634,8 +761,11 @@ async function askGeminiSafely(question, user) {
       answerText = parsed.text;
     }
   } catch {
-    const firstBrace = cleaned.indexOf("{");
-    const lastBrace = cleaned.lastIndexOf("}");
+    const firstBrace =
+      cleaned.indexOf("{");
+
+    const lastBrace =
+      cleaned.lastIndexOf("}");
 
     if (
       firstBrace !== -1 &&
@@ -656,42 +786,14 @@ async function askGeminiSafely(question, user) {
           answerText = parsed.text;
         }
       } catch {
-        // gunakan raw cleaned text
+        // fallback raw text
       }
     }
   }
 
-  return cleanGeminiText(answerText);
-}
-
-// ============================================================
-// NAVIGATION
-// ============================================================
-
-function getNavigationLinks(question) {
-  try {
-    const intent = classifyIntent(question);
-
-    if (
-      intent &&
-      intent.type !== "information" &&
-      intent.link
-    ) {
-      return [
-        {
-          label: intent.link.label,
-          path: intent.link.path,
-        },
-      ];
-    }
-  } catch (error) {
-    console.error(
-      "[Chatbot] classifyIntent error:",
-      error.message
-    );
-  }
-
-  return [];
+  return cleanGeminiText(
+    answerText
+  );
 }
 
 // ============================================================
@@ -722,19 +824,6 @@ async function handleChat(req, res) {
       req.ip ||
       "anonymous";
 
-    // --------------------------------------------------------
-    // Rate limit
-    // --------------------------------------------------------
-
-    if (isUserRateLimited(userId)) {
-      return res.status(429).json({
-        error:
-          "Mohon tunggu sebentar sebelum mengirim pesan berikutnya.",
-      });
-    }
-
-    markUserRequest(userId);
-
     // ========================================================
     // 1. SEARCH STARTER
     // ========================================================
@@ -744,13 +833,13 @@ async function handleChat(req, res) {
 
       return res.json({
         answer: [
-          "Tentu 🌸",
-          "",
           "Silakan masukkan judul, nomor dokumen, atau kata kunci dokumen yang ingin dicari.",
           "",
           "Contoh: Ijazah Iqbal Fachrozi",
         ].join("\n"),
+
         links: [],
+
         mode: "document_search",
       });
     }
@@ -762,23 +851,31 @@ async function handleChat(req, res) {
     if (hasSearchSession(userId)) {
       clearSearchSession(userId);
 
-      const documents = await searchDocuments(
-        trimmed,
-        req.user
-      );
+      const documents =
+        await searchDocuments(
+          trimmed,
+          req.user
+        );
 
       return res.json({
         answer: buildSearchAnswer(
           trimmed,
           documents
         ),
-        links: buildDocumentLinks(documents),
-        results: documents.map((doc) => ({
-          id: doc.id,
-          judul: doc.judul,
-          nomor: doc.nomor_dokumen,
-          status: doc.status,
-        })),
+
+        links:
+          buildDocumentLinks(
+            documents
+          ),
+
+        results:
+          documents.map((doc) => ({
+            id: doc.id,
+            judul: doc.judul,
+            nomor: doc.nomor_dokumen,
+            status: doc.status,
+            uploader: doc.uploader,
+          })),
       });
     }
 
@@ -786,8 +883,11 @@ async function handleChat(req, res) {
     // 3. EXPLICIT DOCUMENT SEARCH
     // ========================================================
 
-    if (isExplicitDocumentSearch(trimmed)) {
-      const query = extractSearchQuery(trimmed);
+    if (
+      isExplicitDocumentSearch(trimmed)
+    ) {
+      const query =
+        extractSearchQuery(trimmed);
 
       if (!query) {
         setSearchSession(userId);
@@ -795,119 +895,149 @@ async function handleChat(req, res) {
         return res.json({
           answer:
             "Silakan masukkan judul, nomor dokumen, atau kata kunci dokumen yang ingin dicari.",
+
           links: [],
+
           mode: "document_search",
         });
       }
 
-      const documents = await searchDocuments(
-        query,
-        req.user
-      );
+      const documents =
+        await searchDocuments(
+          query,
+          req.user
+        );
 
       return res.json({
-        answer: buildSearchAnswer(
-          query,
-          documents
-        ),
-        links: buildDocumentLinks(documents),
-        results: documents.map((doc) => ({
-          id: doc.id,
-          judul: doc.judul,
-          nomor: doc.nomor_dokumen,
-          status: doc.status,
-        })),
+        answer:
+          buildSearchAnswer(
+            query,
+            documents
+          ),
+
+        links:
+          buildDocumentLinks(
+            documents
+          ),
+
+        results:
+          documents.map((doc) => ({
+            id: doc.id,
+            judul: doc.judul,
+            nomor: doc.nomor_dokumen,
+            status: doc.status,
+            uploader: doc.uploader,
+          })),
       });
     }
 
     // ========================================================
     // 4. STATISTICS
+    //
+    // TIDAK memanggil Gemini.
+    // Data langsung dari database.
+    // Tetap menghasilkan tombol Dashboard.
     // ========================================================
 
-    if (isStatisticsIntent(trimmed)) {
-      const stats = await getStatistics(req.user);
+    if (
+      isStatisticsIntent(trimmed)
+    ) {
+      const stats =
+        await getStatistics(
+          req.user
+        );
 
       return res.json({
-        answer: buildStatisticsAnswer(stats),
+        answer:
+          buildStatisticsAnswer(
+            stats
+          ),
+
         links: [
           {
             label: "Buka Dashboard",
             path: "/dashboard",
           },
         ],
+
         statistics: stats,
       });
     }
 
     // ========================================================
-    // 5. HELP / HOW TO USE SAKURA
+    // 5. HELP
+    //
+    // TIDAK memanggil Gemini agar format selalu konsisten.
     // ========================================================
 
-    if (isHelpIntent(trimmed)) {
+    if (
+      isHelpIntent(trimmed)
+    ) {
       return res.json({
-        answer: buildHelpAnswer(req.user),
-        links: buildHelpLinks(req.user),
+        answer:
+          buildHelpAnswer(
+            req.user
+          ),
+
+        links:
+          buildHelpLinks(
+            req.user
+          ),
       });
     }
 
     // ========================================================
     // 6. NAVIGATION
     //
-    // Contoh:
+    // INI MEMPERTAHANKAN BEHAVIOR SCREENSHOT LAMA.
+    //
     // "antar saya ke upload"
-    // "buka halaman arsip"
+    // -> answer
+    // -> tombol "Buka halaman Upload"
+    //
+    // "antar ke log"
+    // -> answer
+    // -> tombol "Buka Log Aktivitas"
     // ========================================================
 
-    const navigationLinks =
-      getNavigationLinks(trimmed);
+    const navigationResponse =
+      getNavigationResponse(trimmed);
 
-    if (navigationLinks.length > 0) {
-      const lower = normalizeText(trimmed);
-
-      let answer =
-        "Tentu. Gunakan tombol di bawah untuk membuka halaman yang kamu butuhkan.";
-
-      if (
-        lower.includes("upload")
-      ) {
-        answer =
-          "Tentu. Buka halaman Upload untuk menambahkan dokumen baru.";
-      } else if (
-        lower.includes("dashboard") ||
-        lower.includes("statistik")
-      ) {
-        answer =
-          "Tentu. Buka Dashboard untuk melihat ringkasan dan grafik statistik dokumen.";
-      } else if (
-        lower.includes("arsip")
-      ) {
-        answer =
-          "Tentu. Buka halaman Arsip untuk melihat dan mencari dokumen.";
-      } else if (
-        lower.includes("persetujuan") ||
-        lower.includes("approval")
-      ) {
-        answer =
-          "Tentu. Buka halaman Persetujuan untuk melihat dokumen yang memerlukan proses persetujuan.";
-      }
-
-      return res.json({
-        answer,
-        links: navigationLinks,
-      });
+    if (navigationResponse) {
+      return res.json(
+        navigationResponse
+      );
     }
 
     // ========================================================
-    // 7. GENERAL AI QUESTION -> GEMINI
+    // 7. GENERAL AI -> GEMINI
+    //
+    // HANYA sampai sini Gemini dipanggil.
     // ========================================================
+
+    if (
+      isGeminiRateLimited(userId)
+    ) {
+      return res.json({
+        answer:
+          "Permintaan AI sebelumnya masih diproses. Silakan coba lagi sebentar.",
+
+        links: [],
+      });
+    }
+
+    markGeminiRequest(userId);
 
     const cacheKey = [
       req.user?.id || "",
-      req.user?.role || "",
+      req.user?.role ||
+        req.user?.role_name ||
+        "",
       normalizeText(trimmed),
     ].join(":");
 
-    const cached = getCached(cacheKey);
+    const cached =
+      getCached(cacheKey);
 
     if (cached) {
       return res.json({
@@ -925,7 +1055,8 @@ async function handleChat(req, res) {
     const response = {
       answer:
         answerText ||
-        "Maaf, saya belum dapat memproses pertanyaan tersebut.",
+        "Saya belum dapat memproses pertanyaan tersebut.",
+
       links: [],
     };
 
@@ -943,12 +1074,15 @@ async function handleChat(req, res) {
         message: error?.message,
         stack: error?.stack,
         userId: req.user?.id,
-        role: req.user?.role,
+        role:
+          req.user?.role ||
+          req.user?.role_name,
       }
     );
 
     return res.status(502).json({
-      error: friendlyError(error),
+      error:
+        friendlyError(error),
     });
   }
 }

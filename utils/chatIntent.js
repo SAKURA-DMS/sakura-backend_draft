@@ -1,101 +1,442 @@
 /**
- * chatIntent.js
+ * utils/chatIntent.js
  *
- * Intent detection + route mapping untuk SAKURA AI Chatbot.
+ * Intent detector untuk navigasi SAKURA AI.
  *
- * Sebelumnya, keputusan "tampilkan tombol navigasi atau tidak" sepenuhnya
- * diserahkan ke Gemini lewat instruksi JSON bebas ("links":[...]). Ini tidak
- * konsisten — AI kadang menyertakan tombol navigasi walau user hanya
- * bertanya statistik/jumlah dokumen (informational question).
- *
- * Modul ini memindahkan keputusan itu ke logika deterministik berbasis
- * PERTANYAAN USER (bukan jawaban AI), supaya hasilnya bisa diprediksi dan
- * diaudit. Tidak menyentuh Gemini API / OCR sama sekali.
- *
- * Intent dibagi 3:
- * - "information" → JANGAN tampilkan tombol navigasi (kecuali diminta).
- * - "navigation"  → user eksplisit minta pindah/buka halaman tertentu.
- * - "folder"      → user menyebut nama folder dokumen tertentu.
+ * Tujuan:
+ * - Navigasi ditentukan secara deterministik, bukan diserahkan ke Gemini.
+ * - Tetap menghasilkan tombol navigasi seperti UI chatbot sebelumnya.
+ * - Pertanyaan statistik/search/help tidak salah masuk ke navigation.
+ * - Mendukung perintah natural seperti:
+ *   "antar saya ke upload"
+ *   "antar ke log"
+ *   "buka arsip"
+ *   "bawa saya ke dashboard"
  */
 
-// ─── ROUTE MAP — halaman umum (bukan folder dokumen) ───────────────────────
 const ROUTE_MAP = {
-  upload:      { keys: ["upload", "unggah dokumen", "halaman upload"], path: "/upload",     label: "Buka halaman Upload" },
-  dashboard:   { keys: ["dashboard", "beranda utama"],                 path: "/dashboard",   label: "Buka Dashboard" },
-  approval:    { keys: ["approval", "persetujuan"],                   path: "/approval",    label: "Buka halaman Persetujuan" },
-  arsip:       { keys: ["arsip", "archive"],                          path: "/archive",     label: "Buka Arsip Dokumen" },
-  users:       { keys: ["manajemen pengguna", "kelola pengguna", "users", "pengguna"], path: "/users",  label: "Buka Manajemen Pengguna" },
-  roles:       { keys: ["manajemen peran", "roles", "peran"],         path: "/roles",       label: "Buka Manajemen Peran" },
-  logs:        { keys: ["log aktivitas", "riwayat", "logs"],          path: "/logs",        label: "Buka Log Aktivitas" },
-  settings:    { keys: ["settings", "pengaturan"],                    path: "/settings",    label: "Buka Pengaturan" },
-  profile:     { keys: ["profil", "profile"],                         path: "/profile",     label: "Buka Profil" },
-  home:        { keys: ["home", "beranda"],                           path: "/home",        label: "Buka Beranda" },
+  upload: {
+    keys: [
+      "upload",
+      "upload dokumen",
+      "unggah",
+      "unggah dokumen",
+      "halaman upload",
+    ],
+    path: "/upload",
+    label: "Buka halaman Upload",
+  },
+
+  dashboard: {
+    keys: [
+      "dashboard",
+      "beranda utama",
+      "grafik statistik",
+      "grafik dokumen",
+    ],
+    path: "/dashboard",
+    label: "Buka Dashboard",
+  },
+
+  approval: {
+    keys: [
+      "approval",
+      "persetujuan",
+      "halaman persetujuan",
+    ],
+    path: "/approval",
+    label: "Buka halaman Persetujuan",
+  },
+
+  archive: {
+    keys: [
+      "arsip",
+      "archive",
+      "arsip dokumen",
+      "halaman arsip",
+    ],
+    path: "/archive",
+    label: "Buka halaman Arsip",
+  },
+
+  users: {
+    keys: [
+      "pengguna",
+      "users",
+      "manajemen pengguna",
+      "kelola pengguna",
+    ],
+    path: "/users",
+    label: "Buka Manajemen Pengguna",
+  },
+
+  roles: {
+    keys: [
+      "role",
+      "roles",
+      "peran",
+      "manajemen peran",
+      "kelola peran",
+    ],
+    path: "/roles",
+    label: "Buka Manajemen Peran",
+  },
+
+  logs: {
+    keys: [
+      "log",
+      "logs",
+      "log aktivitas",
+      "activity log",
+      "riwayat aktivitas",
+      "audit trail",
+    ],
+    path: "/logs",
+    label: "Buka Log Aktivitas",
+  },
+
+  settings: {
+    keys: [
+      "pengaturan",
+      "settings",
+      "setting",
+    ],
+    path: "/settings",
+    label: "Buka Pengaturan",
+  },
+
+  profile: {
+    keys: [
+      "profil",
+      "profile",
+    ],
+    path: "/profile",
+    label: "Buka Profil",
+  },
+
+  home: {
+    keys: [
+      "home",
+      "beranda",
+    ],
+    path: "/home",
+    label: "Buka Beranda",
+  },
+
+  trash: {
+    keys: [
+      "sampah",
+      "trash",
+      "kotak sampah",
+    ],
+    path: "/trash",
+    label: "Buka Kotak Sampah",
+  },
 };
 
-// ─── FOLDER MAP — folder dokumen spesifik ───────────────────────────────────
 const FOLDER_MAP = {
-  "data siswa":     { path: "/documents?folder=data-siswa",     label: "Buka Folder Data Siswa" },
-  "data guru":      { path: "/documents?folder=data-guru",      label: "Buka Folder Data Guru" },
-  "surat masuk":    { path: "/documents?folder=surat-masuk",    label: "Buka Folder Surat Masuk" },
-  "surat keluar":   { path: "/documents?folder=surat-keluar",   label: "Buka Folder Surat Keluar" },
-  "arsip akademik": { path: "/documents?folder=arsip-akademik", label: "Buka Folder Arsip Akademik" },
+  "data siswa": {
+    path: "/documents?folder=data-siswa",
+    label: "Buka Folder Data Siswa",
+  },
+
+  "data guru": {
+    path: "/documents?folder=data-guru",
+    label: "Buka Folder Data Guru",
+  },
+
+  "surat masuk": {
+    path: "/documents?folder=surat-masuk",
+    label: "Buka Folder Surat Masuk",
+  },
+
+  "surat keluar": {
+    path: "/documents?folder=surat-keluar",
+    label: "Buka Folder Surat Keluar",
+  },
+
+  "arsip akademik": {
+    path: "/documents?folder=arsip-akademik",
+    label: "Buka Folder Arsip Akademik",
+  },
 };
 
-// ─── Pola kata kunci ────────────────────────────────────────────────────────
-// INFORMATION: pertanyaan seputar jumlah/statistik/status — TIDAK butuh tombol.
-const INFO_PATTERN = /(berapa|jumlah|total|statistik|status\s+dokumen|ada\s+berapa|sudah\s+ada\s+berapa)/i;
-
-// NAVIGATION: kata kerja yang menandakan user ingin BERPINDAH halaman.
-const NAV_VERB_PATTERN = /(buka|bawa\s+saya|antar(kan)?\s+saya|pergi\s+ke|arahkan(\s+saya)?|tampilkan|menuju|pindah\s+ke|masuk\s+ke\s+halaman|ke\s+halaman)/i;
-
-function normalize(text) {
-  return (text || "").toLowerCase().trim();
-}
-
-function findFolderMatch(lower) {
-  return Object.keys(FOLDER_MAP).find((key) => lower.includes(key)) || null;
-}
-
-function findRouteMatch(lower) {
-  return Object.keys(ROUTE_MAP).find((key) => ROUTE_MAP[key].keys.some((k) => lower.includes(k))) || null;
+/**
+ * Normalisasi teks user agar pencocokan intent lebih konsisten.
+ */
+function normalize(text = "") {
+  return String(text)
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
 /**
- * Klasifikasikan intent dari pesan USER (bukan jawaban AI).
- * @param {string} message - pesan asli dari user
- * @returns {{ type: "information"|"navigation"|"folder", link?: {label:string, path:string} }}
+ * Escape karakter khusus sebelum dimasukkan ke RegExp.
+ */
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Mengecek apakah sebuah keyword terdapat dalam teks.
+ *
+ * Untuk keyword satu kata:
+ * - menggunakan word boundary
+ * - mencegah "log" salah match dengan kata lain
+ *
+ * Untuk keyword lebih dari satu kata:
+ * - menggunakan includes()
+ */
+function containsKeyword(text, keyword) {
+  if (!text || !keyword) {
+    return false;
+  }
+
+  const normalizedText = normalize(text);
+  const normalizedKeyword = normalize(keyword);
+
+  if (/^[a-z0-9]+$/i.test(normalizedKeyword)) {
+    const regex = new RegExp(
+      `\\b${escapeRegex(normalizedKeyword)}\\b`,
+      "i"
+    );
+
+    return regex.test(normalizedText);
+  }
+
+  return normalizedText.includes(normalizedKeyword);
+}
+
+/**
+ * Cari halaman umum yang disebut user.
+ */
+function findRouteMatch(lower) {
+  for (const [routeKey, config] of Object.entries(ROUTE_MAP)) {
+    const matched = config.keys.some((keyword) =>
+      containsKeyword(lower, keyword)
+    );
+
+    if (matched) {
+      return {
+        routeKey,
+        config,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Cari folder dokumen yang disebut user.
+ */
+function findFolderMatch(lower) {
+  for (const [folderKey, config] of Object.entries(FOLDER_MAP)) {
+    if (containsKeyword(lower, folderKey)) {
+      return {
+        folderKey,
+        config,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Mengecek apakah user benar-benar meminta navigasi.
+ *
+ * Contoh yang dikenali:
+ *
+ * - "antar saya ke upload"
+ * - "antar ke log"
+ * - "antarkan saya ke arsip"
+ * - "buka dashboard"
+ * - "bukakan halaman upload"
+ * - "bawa saya ke log"
+ * - "bawakan saya ke arsip"
+ * - "arahkan saya ke persetujuan"
+ * - "pergi ke profil"
+ * - "pindah ke dashboard"
+ * - "masuk ke pengaturan"
+ * - "menuju halaman arsip"
+ *
+ * CATATAN:
+ * Regex HARUS satu baris.
+ * JavaScript tidak mendukung regex flag "x".
+ */
+function hasNavigationVerb(lower) {
+  if (!lower) {
+    return false;
+  }
+
+  return /\b(buka|bukakan|antar|antarkan|bawa|bawakan|arahkan|pergi|pindah|masuk|menuju|navigasi)\b/i.test(
+    lower
+  );
+}
+
+/**
+ * Mengecek apakah pesan merupakan pertanyaan informasi.
+ *
+ * Ini penting supaya pertanyaan seperti:
+ *
+ * "berapa jumlah dokumen?"
+ * "tampilkan statistik dokumen"
+ * "berapa dokumen ditolak?"
+ *
+ * tidak otomatis dianggap sebagai navigasi.
+ */
+function isInformationQuestion(lower) {
+  if (!lower) {
+    return false;
+  }
+
+  return (
+    /\b(berapa|jumlah|total|status)\b/i.test(lower) ||
+    /\b(statistik|statistic|stats)\b/i.test(lower) ||
+    /ada\s+berapa/i.test(lower) ||
+    /ringkasan\s+dokumen/i.test(lower)
+  );
+}
+
+/**
+ * Klasifikasi intent pesan user.
+ *
+ * Hasil:
+ *
+ * {
+ *   type: "navigation",
+ *   route: "upload",
+ *   link: {
+ *     label: "Buka halaman Upload",
+ *     path: "/upload"
+ *   }
+ * }
+ *
+ * atau:
+ *
+ * {
+ *   type: "folder",
+ *   folder: "data siswa",
+ *   link: {...}
+ * }
+ *
+ * atau:
+ *
+ * {
+ *   type: "information"
+ * }
  */
 function classifyIntent(message) {
   const lower = normalize(message);
-  if (!lower) return { type: "information" };
 
-  const hasInfoPattern = INFO_PATTERN.test(lower);
-  const hasNavVerb     = NAV_VERB_PATTERN.test(lower);
-
-  // Rule utama: pertanyaan informasi ("ada berapa dokumen di folder data
-  // siswa?") menang atas penyebutan folder/route selama tidak ada kata kerja
-  // navigasi eksplisit. Ini yang mencegah tombol muncul hanya karena user
-  // menyebut nama folder di dalam pertanyaan statistik.
-  if (hasInfoPattern && !hasNavVerb) {
-    return { type: "information" };
+  if (!lower) {
+    return {
+      type: "information",
+    };
   }
 
-  // FOLDER INTENT: user menyebut folder dokumen tertentu (dengan atau tanpa
-  // kata kerja navigasi eksplisit — mis. "tampilkan data siswa" atau cukup
-  // "data siswa").
-  const folderKey = findFolderMatch(lower);
-  if (folderKey) {
-    return { type: "folder", folder: folderKey, link: FOLDER_MAP[folderKey] };
+  const navigationRequested = hasNavigationVerb(lower);
+
+  /*
+   * ============================================================
+   * 1. NAVIGASI FOLDER
+   * ============================================================
+   *
+   * Contoh:
+   *
+   * "antar saya ke data siswa"
+   * "buka folder data guru"
+   * "arahkan saya ke surat masuk"
+   */
+
+  if (navigationRequested) {
+    const folderMatch = findFolderMatch(lower);
+
+    if (folderMatch) {
+      return {
+        type: "folder",
+
+        folder: folderMatch.folderKey,
+
+        link: {
+          label: folderMatch.config.label,
+          path: folderMatch.config.path,
+        },
+      };
+    }
   }
 
-  // NAVIGATION INTENT: butuh kata kerja navigasi eksplisit + halaman dikenali.
-  const routeKey = findRouteMatch(lower);
-  if (routeKey && hasNavVerb) {
-    return { type: "navigation", route: routeKey, link: ROUTE_MAP[routeKey] };
+  /*
+   * ============================================================
+   * 2. NAVIGASI HALAMAN
+   * ============================================================
+   *
+   * Contoh:
+   *
+   * "antar saya ke upload"
+   * "antar ke log"
+   * "buka dashboard"
+   * "bawa saya ke arsip"
+   */
+
+  if (navigationRequested) {
+    const routeMatch = findRouteMatch(lower);
+
+    if (routeMatch) {
+      return {
+        type: "navigation",
+
+        route: routeMatch.routeKey,
+
+        link: {
+          label: routeMatch.config.label,
+          path: routeMatch.config.path,
+        },
+      };
+    }
   }
 
-  // Default aman: tidak menampilkan tombol jika intent tidak jelas.
-  return { type: "information" };
+  /*
+   * ============================================================
+   * 3. INFORMATION
+   * ============================================================
+   *
+   * Contoh:
+   *
+   * "berapa jumlah dokumen?"
+   * "tampilkan statistik dokumen"
+   * "berapa dokumen yang ditolak?"
+   *
+   * Ini TIDAK dianggap navigation di sini.
+   *
+   * Controller chatbot dapat menangani intent statistik secara
+   * khusus dan tetap memberikan tombol Dashboard jika diperlukan.
+   */
+
+  if (isInformationQuestion(lower)) {
+    return {
+      type: "information",
+    };
+  }
+
+  /*
+   * ============================================================
+   * 4. DEFAULT
+   * ============================================================
+   *
+   * Search dokumen, bantuan penggunaan, percakapan dengan Gemini,
+   * dan intent lain akan diteruskan sebagai information.
+   */
+
+  return {
+    type: "information",
+  };
 }
 
-module.exports = { ROUTE_MAP, FOLDER_MAP, classifyIntent };
+module.exports = {
+  ROUTE_MAP,
+  FOLDER_MAP,
+  classifyIntent,
+};
