@@ -1,21 +1,25 @@
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
 
-const OTP_EXPIRY_MINUTES = Number(process.env.OTP_EXPIRY_MINUTES || 5);
-const BCRYPT_ROUNDS       = 10;
+// OTP berlaku selama 1 menit.
+// Nilai ini masih bisa dioverride melalui environment variable
+// OTP_EXPIRY_MINUTES di Railway.
+const OTP_EXPIRY_MINUTES = Number(process.env.OTP_EXPIRY_MINUTES || 1);
+
+const BCRYPT_ROUNDS = 10;
 
 /**
  * Generate OTP 6 digit secara kriptografis aman.
- * @returns {string} "000000"–"999999" (selalu 6 karakter, zero-padded)
+ * @returns {string} OTP 6 digit, termasuk kemungkinan angka 0 di depan.
  */
 function generateOtp() {
-  // crypto.randomInt(0, 1_000_000) → integer [0, 999999]
   const num = crypto.randomInt(0, 1_000_000);
   return String(num).padStart(6, "0");
 }
 
 /**
- * Hash OTP menggunakan bcrypt.
+ * Hash OTP menggunakan bcrypt sebelum disimpan ke database.
+ *
  * @param {string} otp - OTP plaintext 6 digit
  * @returns {Promise<string>} bcrypt hash
  */
@@ -24,32 +28,50 @@ async function hashOtp(otp) {
 }
 
 /**
- * Verifikasi OTP plaintext terhadap bcrypt hash.
- * @param {string} otp     - OTP plaintext yang diinput user
- * @param {string} otpHash - bcrypt hash dari DB
+ * Verifikasi OTP yang dimasukkan user terhadap hash yang tersimpan.
+ *
+ * @param {string} otp - OTP plaintext yang diinput user
+ * @param {string} otpHash - bcrypt hash dari database
  * @returns {Promise<boolean>}
  */
 async function verifyOtp(otp, otpHash) {
-  return bcrypt.compare(otp, otpHash);
+  if (!otp || !otpHash) return false;
+
+  return bcrypt.compare(String(otp), otpHash);
 }
 
 /**
  * Hitung waktu kedaluwarsa OTP.
+ *
+ * Default: 1 menit sejak OTP dibuat.
+ *
  * @returns {Date} timestamp expires_at
  */
 function getOtpExpiry() {
-  const d = new Date();
-  d.setMinutes(d.getMinutes() + OTP_EXPIRY_MINUTES);
-  return d;
+  const expiry = new Date();
+
+  expiry.setTime(
+    expiry.getTime() + OTP_EXPIRY_MINUTES * 60 * 1000
+  );
+
+  return expiry;
 }
 
 /**
  * Cek apakah OTP sudah kedaluwarsa.
+ *
  * @param {Date|string} expiresAt
  * @returns {boolean}
  */
 function isOtpExpired(expiresAt) {
-  return new Date() > new Date(expiresAt);
+  if (!expiresAt) return true;
+
+  const expiryTime = new Date(expiresAt).getTime();
+
+  // Jika tanggal tidak valid, anggap OTP tidak valid/expired.
+  if (Number.isNaN(expiryTime)) return true;
+
+  return Date.now() >= expiryTime;
 }
 
 module.exports = {
