@@ -7,7 +7,10 @@ const { generateAuditHash } = require("../utils/auditHash");
 const router = express.Router();
 router.use(authRequired);
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+function allowApprovalsView(req, res, next) {
+  if (req.user?.role === "Guru") return next();
+  return requirePermission("approvals.view")(req, res, next);
+}
 
 async function addAudit(
   conn,
@@ -90,12 +93,6 @@ async function getApprovers(conn, excludeUserId) {
   return rows.map((r) => r.id);
 }
 
-// Membersihkan approval_requests yang "yatim": statusnya masih 'pending'
-// tapi dokumen terkait sudah tidak lagi berstatus 'Menunggu' (sudah diputuskan
-// lewat jalur lain, mis. endpoint /api/documents/:id/approve, atau data lama).
-// Tanpa pembersihan ini baris tersebut akan terus muncul di antrian pending
-// padahal dokumennya sudah final, dan riwayat di tab "Disetujui/Ditolak" tidak
-// pernah terisi karena baris approval_requests-nya tidak ikut terupdate.
 async function reconcileOrphanPendingRequests(conn, documentId = null) {
   const where = documentId
     ? "ar.status = 'pending' AND ar.document_id = ? AND d.status != 'Menunggu'"
@@ -131,14 +128,10 @@ async function reconcileOrphanPendingRequests(conn, documentId = null) {
   return orphans;
 }
 
-// ── GET /api/approvals — list request ─────────────────────────────────────────
-router.get("/", requirePermission("approvals.view"), async (req, res, next) => {
+router.get("/", allowApprovalsView, async (req, res, next) => {
   try {
     const { status, document_id, requester_id, limit = 100, offset = 0 } = req.query;
 
-    // Self-heal: rapikan dulu baris pending yang dokumennya sudah final
-    // (mis. sudah disetujui/ditolak lewat jalur lain) agar antrian pending,
-    // riwayat disetujui/ditolak, dan badge count selalu konsisten.
     const cleanupConn = await pool.getConnection();
     try {
       await cleanupConn.beginTransaction();
@@ -158,7 +151,6 @@ router.get("/", requirePermission("approvals.view"), async (req, res, next) => {
     if (document_id)  { where.push("ar.document_id = ?");  params.push(document_id); }
     if (requester_id) { where.push("ar.requester_id = ?"); params.push(requester_id); }
 
-    // Guru hanya boleh lihat request miliknya
     if (req.user.role === "Guru") {
       where.push("ar.requester_id = ?");
       params.push(req.user.id);
@@ -201,7 +193,6 @@ router.get("/", requirePermission("approvals.view"), async (req, res, next) => {
       [...params, Number(limit), Number(offset)]
     );
 
-    // Total count (untuk paginasi)
     const [[{ total }]] = await pool.query(
       `SELECT COUNT(*) AS total
        FROM approval_requests ar
@@ -213,8 +204,7 @@ router.get("/", requirePermission("approvals.view"), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/approvals/:id — detail request ───────────────────────────────────
-router.get("/:id", requirePermission("approvals.view"), async (req, res, next) => {
+router.get("/:id", allowApprovalsView, async (req, res, next) => {
   try {
     const [[ar]] = await pool.query(
       `SELECT
@@ -239,12 +229,10 @@ router.get("/:id", requirePermission("approvals.view"), async (req, res, next) =
     );
     if (!ar) return res.status(404).json({ error: "Approval request tidak ditemukan" });
 
-    // Guru hanya boleh lihat request miliknya
     if (req.user.role === "Guru" && ar.requester_id !== req.user.id) {
       return res.status(403).json({ error: "Akses ditolak" });
     }
 
-    // Audit trail khusus request ini
     const [trail] = await pool.query(
       `SELECT a.*, u.nama, u.role, u.avatar
        FROM audit_trail a
@@ -258,9 +246,19 @@ router.get("/:id", requirePermission("approvals.view"), async (req, res, next) =
   } catch (e) { next(e); }
 });
 
-// ── GET /api/approvals/:id/audit — audit trail request ───────────────────────
-router.get("/:id/audit", requirePermission("approvals.view"), async (req, res, next) => {
+router.get("/:id/audit", allowApprovalsView, async (req, res, next) => {
   try {
+    if (req.user.role === "Guru") {
+      const [[ar]] = await pool.query(
+        "SELECT requester_id FROM approval_requests WHERE id = ?",
+        [req.params.id]
+      );
+      if (!ar) return res.status(404).json({ error: "Approval request tidak ditemukan" });
+      if (ar.requester_id !== req.user.id) {
+        return res.status(403).json({ error: "Akses ditolak" });
+      }
+    }
+
     const [rows] = await pool.query(
       `SELECT a.*, u.nama, u.role, u.avatar
        FROM audit_trail a
@@ -273,8 +271,6 @@ router.get("/:id/audit", requirePermission("approvals.view"), async (req, res, n
   } catch (e) { next(e); }
 });
 
-// ── POST /api/approvals — buat approval request baru ─────────────────────────
-// Hanya user dengan permission documents.upload (atau approvals.manage) yang bisa request.
 router.post("/", requirePermission("approvals.manage"), async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
@@ -286,7 +282,6 @@ router.post("/", requirePermission("approvals.manage"), async (req, res, next) =
       return res.status(400).json({ error: "document_id wajib diisi" });
     }
 
-    // Validasi dokumen: harus ada, tidak terhapus, statusnya bukan Diarsipkan
     const [[doc]] = await conn.query(
       "SELECT id, judul, status, uploaded_by, deleted_at FROM documents WHERE id = ?",
       [document_id]
@@ -298,13 +293,11 @@ router.post("/", requirePermission("approvals.manage"), async (req, res, next) =
       return res.status(409).json({ error: "Dokumen sudah diarsipkan, tidak perlu approval lagi" });
     }
 
-    // Guru hanya bisa request untuk dokumen miliknya sendiri
     if (req.user.role === "Guru" && doc.uploaded_by !== req.user.id) {
       await conn.rollback();
       return res.status(403).json({ error: "Anda hanya bisa mengajukan persetujuan untuk dokumen milik Anda" });
     }
 
-    // Cek: sudah ada pending request untuk dokumen ini?
     const [[existing]] = await conn.query(
       "SELECT id FROM approval_requests WHERE document_id = ? AND status = 'pending' LIMIT 1",
       [document_id]
@@ -317,8 +310,6 @@ router.post("/", requirePermission("approvals.manage"), async (req, res, next) =
       });
     }
 
-    // Batalkan request lama yang rejected/cancelled (opsional — biarkan history tetap ada, cukup buat baru)
-    // Buat approval request baru
     const [ins] = await conn.query(
       `INSERT INTO approval_requests (document_id, requester_id, status, requester_note, requested_at)
        VALUES (?, ?, 'pending', ?, NOW())`,
@@ -326,19 +317,16 @@ router.post("/", requirePermission("approvals.manage"), async (req, res, next) =
     );
     const requestId = ins.insertId;
 
-    // Update status dokumen → Menunggu
     await conn.query(
       "UPDATE documents SET status = 'Menunggu', updated_at = NOW() WHERE id = ?",
       [document_id]
     );
 
-    // Audit
     const auditMsg = requester_note
       ? `Mengajukan persetujuan: "${requester_note}"`
       : "Mengajukan persetujuan dokumen";
     await addAudit(conn, document_id, req.user.id, auditMsg, requestId, { status: "Menunggu" });
 
-    // Notifikasi ke semua approver
     const approverIds = await getApprovers(conn, req.user.id);
     await sendNotif(
       conn, approverIds,
@@ -360,7 +348,6 @@ router.post("/", requirePermission("approvals.manage"), async (req, res, next) =
   }
 });
 
-// ── POST /api/approvals/:id/approve ──────────────────────────────────────────
 router.post("/:id/approve", requirePermission("documents.approve"), async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
@@ -368,7 +355,6 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
 
     const { comment = "" } = req.body || {};
 
-    // Ambil request
     const [[ar]] = await conn.query(
       "SELECT * FROM approval_requests WHERE id = ? FOR UPDATE",
       [req.params.id]
@@ -379,10 +365,6 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       return res.status(409).json({ error: `Request sudah berstatus '${ar.status}', tidak dapat disetujui` });
     }
 
-    // Validasi dokumen masih 'Menunggu'. Jika dokumen sudah final (mis. sudah
-    // diputuskan lewat endpoint lain atau data lama), jangan macet dengan error
-    // generik — selaraskan saja status request ini supaya konsisten lalu kabari
-    // pengguna apa yang sebenarnya terjadi.
     const [[doc]] = await conn.query(
       "SELECT id, judul, status, uploaded_by FROM documents WHERE id = ? FOR UPDATE",
       [ar.document_id]
@@ -414,7 +396,6 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       });
     }
 
-    // Update approval_request
     await conn.query(
       `UPDATE approval_requests
          SET status = 'approved', approver_id = ?, approver_note = ?, decided_at = NOW()
@@ -422,7 +403,6 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       [req.user.id, comment || null, ar.id]
     );
 
-    // Update dokumen → Diarsipkan
     await conn.query(
       `UPDATE documents
          SET status = 'Diarsipkan', approval_status = 'approved', approved_by = ?, approved_at = NOW(), updated_at = NOW()
@@ -430,8 +410,6 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       [req.user.id, ar.document_id]
     );
 
-    // Selesaikan juga approval_requests pending lain untuk dokumen yang sama
-    // (jika ada duplikat) agar tidak ada baris yatim yang tersisa di antrian.
     await conn.query(
       `UPDATE approval_requests
          SET status = 'approved', approver_id = ?, decided_at = NOW()
@@ -439,14 +417,12 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
       [req.user.id, ar.document_id, ar.id]
     );
 
-    // Audit (dua entry: keputusan + otomatis arsip)
     const approveMsg = comment
       ? `Menyetujui dokumen: "${comment}"`
       : "Menyetujui dokumen";
     await addAudit(conn, ar.document_id, req.user.id, approveMsg, ar.id, { status: "Menunggu" }, { status: "Disetujui" });
     await addAudit(conn, ar.document_id, req.user.id, "Dokumen otomatis diarsipkan setelah persetujuan", ar.id, { status: "Disetujui" }, { status: "Diarsipkan" });
 
-    // Notifikasi ke requester (uploader)
     await sendNotif(
       conn, [doc.uploaded_by],
       `Dokumen "${doc.judul}" telah disetujui dan diarsipkan`,
@@ -463,7 +439,6 @@ router.post("/:id/approve", requirePermission("documents.approve"), async (req, 
   }
 });
 
-// ── POST /api/approvals/:id/reject ───────────────────────────────────────────
 router.post("/:id/reject", requirePermission("documents.reject"), async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
@@ -475,7 +450,6 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       return res.status(400).json({ error: "reason wajib diisi" });
     }
 
-    // Ambil request
     const [[ar]] = await conn.query(
       "SELECT * FROM approval_requests WHERE id = ? FOR UPDATE",
       [req.params.id]
@@ -486,8 +460,6 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       return res.status(409).json({ error: `Request sudah berstatus '${ar.status}', tidak dapat ditolak` });
     }
 
-    // Validasi dokumen. Jika sudah final lewat jalur lain, selaraskan saja
-    // daripada memberi error yang tidak bisa ditindaklanjuti dari UI.
     const [[doc]] = await conn.query(
       "SELECT id, judul, status, uploaded_by FROM documents WHERE id = ? FOR UPDATE",
       [ar.document_id]
@@ -519,7 +491,6 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       });
     }
 
-    // Update approval_request
     await conn.query(
       `UPDATE approval_requests
          SET status = 'rejected', approver_id = ?, approver_note = ?, decided_at = NOW()
@@ -527,7 +498,6 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       [req.user.id, reason.trim(), ar.id]
     );
 
-    // Update dokumen → Ditolak, simpan alasan di catatan
     await conn.query(
       `UPDATE documents
          SET status = 'Ditolak', catatan = ?, approval_status = 'rejected', approved_by = ?, approved_at = NOW(), updated_at = NOW()
@@ -535,7 +505,6 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       [reason.trim(), req.user.id, ar.document_id]
     );
 
-    // Selesaikan juga approval_requests pending lain untuk dokumen yang sama
     await conn.query(
       `UPDATE approval_requests
          SET status = 'rejected', approver_id = ?, approver_note = ?, decided_at = NOW()
@@ -543,10 +512,8 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
       [req.user.id, reason.trim(), ar.document_id, ar.id]
     );
 
-    // Audit
     await addAudit(conn, ar.document_id, req.user.id, `Menolak dokumen: "${reason.trim()}"`, ar.id, { status: "Menunggu" }, { status: "Ditolak", alasan: reason.trim() });
 
-    // Notifikasi ke requester
     await sendNotif(
       conn, [doc.uploaded_by],
       `Dokumen "${doc.judul}" ditolak. Alasan: ${reason.trim()}`,
@@ -563,8 +530,6 @@ router.post("/:id/reject", requirePermission("documents.reject"), async (req, re
   }
 });
 
-// ── POST /api/approvals/:id/cancel ───────────────────────────────────────────
-// Hanya requester (pemilik request) atau admin yang bisa cancel.
 router.post("/:id/cancel", requirePermission("approvals.manage"), async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
@@ -576,7 +541,6 @@ router.post("/:id/cancel", requirePermission("approvals.manage"), async (req, re
     );
     if (!ar) { await conn.rollback(); return res.status(404).json({ error: "Approval request tidak ditemukan" }); }
 
-    // Hanya requester atau role admin (Kepala Sekolah/Operator/TU) bisa cancel
     const isOwner = ar.requester_id === req.user.id;
     const isAdmin = ["Kepala Sekolah", "Operator/TU"].includes(req.user.role);
     if (!isOwner && !isAdmin) {
@@ -589,7 +553,6 @@ router.post("/:id/cancel", requirePermission("approvals.manage"), async (req, re
       return res.status(409).json({ error: `Request sudah berstatus '${ar.status}', tidak dapat dibatalkan` });
     }
 
-    // Cancel request
     await conn.query(
       "UPDATE approval_requests SET status = 'cancelled', decided_at = NOW() WHERE id = ?",
       [ar.id]
@@ -600,7 +563,6 @@ router.post("/:id/cancel", requirePermission("approvals.manage"), async (req, re
       [ar.document_id]
     );
 
-    // Audit
     await addAudit(conn, ar.document_id, req.user.id, "Membatalkan pengajuan persetujuan", ar.id, { status: "Menunggu" }, { status: "Dibatalkan" });
 
     await conn.commit();
