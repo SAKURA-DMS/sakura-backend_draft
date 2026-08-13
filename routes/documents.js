@@ -224,33 +224,17 @@ router.get("/", async (req, res, next) => {
       params.push(`%${q}%`, `%${q}%`);
     }
 
-    // ── AKSES DOKUMEN UNTUK ROLE GURU ───────────────────────────────────────
+    // ── AKSES DOKUMEN UNTUK ROLE GURU (halaman Arsip) ────────────────────────
     //
-    // Guru boleh melihat:
+    // Halaman Arsip menampilkan SEMUA dokumen untuk semua role, termasuk
+    // Guru — sama seperti role lain yang berhak melihat seluruh arsip.
+    // Tidak ada filter created_by/uploaded_by khusus role Guru di sini.
     //
-    // 1. SEMUA dokumen Data Siswa (category_id = 1).
-    //
-    // 2. Untuk kategori selain Data Siswa:
-    //    - dokumen yang diupload oleh Guru tersebut sendiri, ATAU
-    //    - dokumen yang Guru tersebut terdaftar sebagai owner.
-    //
-    // Filter dilakukan di backend agar aturan akses tidak bisa dilewati
-    // hanya dengan memanggil API secara langsung.
-    if (req.user.role === "Guru") {
-      where.push(`
-        (
-          d.category_id = 1
-          OR d.uploaded_by = ?
-          OR d.id IN (
-            SELECT document_id
-            FROM document_owners
-            WHERE user_id = ?
-          )
-        )
-      `);
-
-      params.push(req.user.id, req.user.id);
-    }
+    // Proteksi dokumen SENSITIVE tetap berjalan lewat assertSensitiveAccess()
+    // pada endpoint detail/download/preview, jadi dokumen sensitive tetap
+    // tidak bisa dibuka Guru yang bukan uploader/owner meskipun muncul di
+    // daftar. Filter khusus "hanya milik sendiri" untuk tab Persetujuan
+    // tetap berada terpisah di routes/approvals.js dan tidak diubah di sini.
 
     const [rows] = await pool.query(
       `
@@ -371,43 +355,10 @@ router.get("/:id", async (req, res, next) => {
 
     // ── AKSES DETAIL UNTUK GURU ──────────────────────────────────────────────
     //
-    // Data Siswa (category_id = 1) boleh dilihat semua Guru.
-    //
-    // Untuk kategori lain:
-    // - jika dokumen non-sensitive, Guru harus uploader atau owner.
-    // - jika dokumen sensitive, assertSensitiveAccess() di bawah akan
-    //   melakukan pengecekan uploader / document_owners.
-    if (
-      req.user.role === "Guru" &&
-      Number(doc.category_id) !== 1 &&
-      !doc.is_sensitive
-    ) {
-      const isUploader =
-        Number(doc.uploaded_by) === Number(req.user.id);
-
-      let isOwner = false;
-
-      if (!isUploader) {
-        const [[owned]] = await pool.query(
-          `
-          SELECT 1
-          FROM document_owners
-          WHERE document_id = ?
-            AND user_id = ?
-          LIMIT 1
-          `,
-          [doc.id, req.user.id]
-        );
-
-        isOwner = !!owned;
-      }
-
-      if (!isUploader && !isOwner) {
-        return res.status(403).json({
-          error: "Akses ditolak",
-        });
-      }
-    }
+    // Halaman Arsip menampilkan SEMUA dokumen untuk Guru, sehingga detail
+    // dokumen non-sensitive juga boleh dibuka tanpa syarat uploader/owner.
+    // Proteksi dokumen sensitive tetap berlaku lewat assertSensitiveAccess()
+    // di bawah ini.
 
     // Proteksi dokumen sensitive tetap berlaku.
     try {

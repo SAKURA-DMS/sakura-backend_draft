@@ -7,12 +7,12 @@ const resend = process.env.RESEND_API_KEY
 async function verifySmtp() {
   if (!process.env.RESEND_API_KEY) {
     console.warn(
-      "⚠️ RESEND_API_KEY belum diset — pengiriman OTP email akan gagal"
+      "RESEND_API_KEY belum diset — pengiriman OTP email akan gagal"
     );
     return;
   }
 
-  console.log("✅ Resend email API configured");
+  console.log("Resend email API configured");
 }
 
 /**
@@ -328,7 +328,7 @@ async function sendOtpEmail({
   otpCode,
   expiryMin = 5,
 }) {
-  const subject = `[SAKURA DMS] Kode OTP Verifikasi: ${otpCode}`;
+  const subject = `[SAKURA DMS] Kode OTP Verifikasi`;
 
   const html = buildOtpEmailHtml(
     namaUser,
