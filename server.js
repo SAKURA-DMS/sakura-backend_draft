@@ -157,8 +157,29 @@ app.use((err, req, res, _next) => {
   if (err.status === 415) {
     return res.status(415).json({ error: err.message });
   }
+
+  // Error yang berasal dari driver database (mysql2/TiDB) TIDAK PERNAH
+  // boleh diteruskan mentah ke client — error tersebut biasanya memuat
+  // username, host, atau bahkan detail koneksi database secara langsung.
+  const isDbError = !!err.code && (
+    err.code.startsWith("ER_") ||        // kode error MySQL/TiDB, mis. ER_ACCESS_DENIED_ERROR
+    err.code.startsWith("ECONNREFUSED") ||
+    err.code.startsWith("ETIMEDOUT") ||
+    err.code === "PROTOCOL_CONNECTION_LOST" ||
+    err.errno !== undefined
+  );
+
+  if (isDbError) {
+    return res.status(503).json({
+      error: "Layanan sedang gangguan. Silakan coba lagi beberapa saat lagi.",
+    });
+  }
+
   const status = err.status || 500;
-  res.status(status).json({ error: err.message || "Internal Server Error" });
+  const isProd = process.env.NODE_ENV === "production";
+  res.status(status).json({
+    error: isProd && status === 500 ? "Internal Server Error" : (err.message || "Internal Server Error"),
+  });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
