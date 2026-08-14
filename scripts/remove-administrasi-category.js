@@ -76,10 +76,19 @@ const SISWA_TYPE_NAMES = [
   "Portofolio Siswa",
 ].map((s) => s.toLowerCase());
 
+// Jenis dokumen yang namanya masih literal "Lainnya" (sisa dari sebelum ada
+// perbaikan auto-create-folder di routes/categories.js) tidak jelas isinya
+// terkait Guru atau Siswa, jadi sesuai keputusan user: DIHAPUS, bukan
+// dipindahkan. Dihapus hanya jika TIDAK ADA dokumen yang masih memakainya
+// (lihat pengecekan di bawah) — supaya tidak ada dokumen yang tiba-tiba
+// kehilangan referensi jenisnya secara diam-diam.
+const DELETE_TYPE_NAMES = ["Lainnya"].map((s) => s.toLowerCase());
+
 function resolveTarget(typeName) {
   const n = typeName.trim().toLowerCase();
   if (GURU_TYPE_NAMES.includes(n)) return "guru";
   if (SISWA_TYPE_NAMES.includes(n)) return "siswa";
+  if (DELETE_TYPE_NAMES.includes(n)) return "delete";
   return null; // tidak dikenali -> perlu ditinjau manual
 }
 
@@ -147,8 +156,10 @@ async function main() {
     }
 
     const unresolvedTypes = [];
+    const deletedTypesBlocked = [];
     let movedGuru = 0;
     let movedSiswa = 0;
+    let deletedTypesCount = 0;
 
     for (const t of adminTypes) {
       const target = resolveTarget(t.type_name);
@@ -156,6 +167,31 @@ async function main() {
         unresolvedTypes.push(t);
         continue;
       }
+
+      if (target === "delete") {
+        // Cek dulu apakah masih ada dokumen yang memakai jenis ini —
+        // kalau ada, JANGAN dihapus (supaya dokumen tidak kehilangan
+        // referensi jenisnya diam-diam). Tandai untuk ditinjau manual.
+        const [[{ cnt }]] = await conn.query(
+          "SELECT COUNT(*) AS cnt FROM documents WHERE type_id = ?",
+          [t.type_id]
+        );
+        if (cnt > 0) {
+          deletedTypesBlocked.push({ ...t, documentCount: cnt });
+          continue;
+        }
+
+        // Aman dihapus: tidak ada dokumen yang memakainya.
+        await conn.query(
+          "DELETE FROM folders WHERE category_id = ? AND type_id = ?",
+          [adminCatId, t.type_id]
+        );
+        await conn.query("DELETE FROM document_types WHERE type_id = ?", [t.type_id]);
+        deletedTypesCount++;
+        console.log(`  ✓ "${t.type_name}" (type_id=${t.type_id}) -> DIHAPUS (tidak ada dokumen yang memakainya)`);
+        continue;
+      }
+
       const newCatId = targetCategoryId[target];
       const rootFolder = target === "guru" ? guruRootFolder : siswaRootFolder;
 
@@ -187,11 +223,19 @@ async function main() {
       console.log(`  ✓ "${t.type_name}" (type_id=${t.type_id}) -> ${target === "guru" ? "Data Guru" : "Data Siswa"}`);
     }
 
-    if (unresolvedTypes.length > 0) {
-      console.warn(`\n⚠ PERLU DITINJAU MANUAL — ${unresolvedTypes.length} jenis dokumen di kategori "Administrasi" TIDAK dikenali dalam daftar pemetaan Guru/Siswa, sehingga TIDAK dipindahkan otomatis dan kategori "Administrasi" TIDAK akan dihapus dulu supaya data ini tidak hilang:`);
-      unresolvedTypes.forEach((t) => console.warn(`    - "${t.type_name}" (type_id=${t.type_id})`));
-      console.warn(`\nSilakan tambahkan nama jenis dokumen di atas ke daftar GURU_TYPE_NAMES / SISWA_TYPE_NAMES pada script ini, lalu jalankan ulang.`);
-      throw new Error("Ada jenis dokumen yang belum dipetakan — migrasi dibatalkan (rollback), tidak ada perubahan yang disimpan.");
+    if (deletedTypesBlocked.length > 0) {
+      console.warn(`\n⚠ PERLU DITINJAU MANUAL — ${deletedTypesBlocked.length} jenis dokumen seharusnya dihapus tapi MASIH ADA dokumen yang memakainya, jadi TIDAK jadi dihapus supaya dokumen tsb tidak rusak referensinya:`);
+      deletedTypesBlocked.forEach((t) => console.warn(`    - "${t.type_name}" (type_id=${t.type_id}) — dipakai oleh ${t.documentCount} dokumen`));
+      console.warn(`\nSilakan cek dokumen-dokumen tsb di halaman Arsip dulu (kategori Administrasi -> jenis "${deletedTypesBlocked[0]?.type_name}"), putuskan mau dipindah ke Data Guru/Data Siswa mana, lalu update GURU_TYPE_NAMES/SISWA_TYPE_NAMES pada script ini (bukan DELETE_TYPE_NAMES), lalu jalankan ulang.`);
+    }
+
+    if (unresolvedTypes.length > 0 || deletedTypesBlocked.length > 0) {
+      if (unresolvedTypes.length > 0) {
+        console.warn(`\n⚠ PERLU DITINJAU MANUAL — ${unresolvedTypes.length} jenis dokumen di kategori "Administrasi" TIDAK dikenali dalam daftar pemetaan Guru/Siswa/Delete, sehingga TIDAK dipindahkan otomatis dan kategori "Administrasi" TIDAK akan dihapus dulu supaya data ini tidak hilang:`);
+        unresolvedTypes.forEach((t) => console.warn(`    - "${t.type_name}" (type_id=${t.type_id})`));
+        console.warn(`\nSilakan tambahkan nama jenis dokumen di atas ke daftar GURU_TYPE_NAMES / SISWA_TYPE_NAMES / DELETE_TYPE_NAMES pada script ini, lalu jalankan ulang.`);
+      }
+      throw new Error("Ada jenis dokumen yang belum dipetakan/diselesaikan — migrasi dibatalkan (rollback), tidak ada perubahan yang disimpan.");
     }
 
     // Semua document_types eks-Administrasi sudah dipindah. Sekarang aman
@@ -246,8 +290,8 @@ async function main() {
       `INSERT INTO audit_trail (document_id, user_id, action, new_value)
        VALUES (NULL, NULL, ?, ?)`,
       [
-        `Migrasi: kategori "Administrasi" dihapus, ${movedGuru} jenis dokumen dipindah ke "Data Guru" dan ${movedSiswa} ke "Data Siswa"`,
-        JSON.stringify({ movedGuru, movedSiswa, adminCategoryIdRemoved: adminCatId }),
+        `Migrasi: kategori "Administrasi" dihapus, ${movedGuru} jenis dokumen dipindah ke "Data Guru", ${movedSiswa} ke "Data Siswa", ${deletedTypesCount} jenis dokumen dihapus`,
+        JSON.stringify({ movedGuru, movedSiswa, deletedTypesCount, adminCategoryIdRemoved: adminCatId }),
       ]
     );
 
@@ -256,6 +300,9 @@ async function main() {
     console.log(`\n✓ Migrasi selesai.`);
     console.log(`  - ${movedGuru} jenis dokumen dipindah ke "Data Guru"`);
     console.log(`  - ${movedSiswa} jenis dokumen dipindah ke "Data Siswa"`);
+    if (deletedTypesCount > 0) {
+      console.log(`  - ${deletedTypesCount} jenis dokumen dihapus (tidak ada dokumen yang memakainya)`);
+    }
     console.log(`  - Kategori "Administrasi" (category_id=${adminCatId}) dihapus dari database.`);
   } catch (e) {
     await conn.rollback().catch(() => {});
