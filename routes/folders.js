@@ -10,7 +10,7 @@ router.use(authRequired);
 // GET /api/folders
 router.get("/", async (_req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM folders ORDER BY folder_id");
+    const [rows] = await pool.query("SELECT * FROM folders ORDER BY category_id, sort_order, folder_id");
     res.json({ folders: rows });
   } catch (e) { next(e); }
 });
@@ -20,14 +20,6 @@ router.post("/", requirePermission("folders.manage"), async (req, res, next) => 
   const { folder_name, parent_id = null, category_id = null, type_id = null, description = "" } = req.body;
   if (!folder_name) return res.status(400).json({ error: "folder_name wajib diisi" });
 
-  // PENTING: kolom `folders.folder_id` di database TIDAK menggunakan
-  // AUTO_INCREMENT (lihat database/sakura_dms.sql — `folder_id int NOT NULL`).
-  // Kode sebelumnya mengandalkan `result.insertId`, yang selalu kosong untuk
-  // tabel tanpa AUTO_INCREMENT, sehingga MySQL/TiDB menolak insert dengan
-  // error "Field 'folder_id' doesn't have a default value". Di sini folder_id
-  // berikutnya dihitung eksplisit (MAX + 1) di dalam transaksi dengan row
-  // lock (FOR UPDATE) supaya tetap atomik walau ada beberapa request
-  // "Buat Folder" yang bersamaan.
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -35,10 +27,16 @@ router.post("/", requirePermission("folders.manage"), async (req, res, next) => 
     const [[row]] = await conn.query("SELECT COALESCE(MAX(folder_id), 0) AS maxId FROM folders FOR UPDATE");
     const newFolderId = row.maxId + 1;
 
+    const [[sortRow]] = await conn.query(
+      "SELECT COALESCE(MAX(sort_order), 0) AS maxSort FROM folders WHERE parent_id <=> ?",
+      [parent_id]
+    );
+    const newSortOrder = sortRow.maxSort + 1;
+
     await conn.query(
-      `INSERT INTO folders (folder_id, folder_name, parent_id, category_id, type_id, description, is_custom)
-       VALUES (?, ?, ?, ?, ?, ?, 1)`,
-      [newFolderId, folder_name, parent_id, category_id, type_id, description]
+      `INSERT INTO folders (folder_id, folder_name, parent_id, category_id, type_id, description, is_custom, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+      [newFolderId, folder_name, parent_id, category_id, type_id, description, newSortOrder]
     );
 
     await conn.commit();
@@ -60,10 +58,6 @@ router.post("/", requirePermission("folders.manage"), async (req, res, next) => 
 });
 
 // PATCH /api/folders/:id
-// Mendukung rename/edit deskripsi (folder_name, description) DAN memindahkan
-// folder ke parent lain (parent_id) — dipakai oleh fitur "Pindahkan Folder".
-// parent_id sengaja dibedakan dari undefined vs null: null berarti "pindahkan
-// ke root", sedangkan tidak dikirim sama sekali berarti "jangan diubah".
 router.patch("/:id", requirePermission("folders.manage"), async (req, res, next) => {
   try {
     const folderId = req.params.id;
@@ -78,7 +72,6 @@ router.patch("/:id", requirePermission("folders.manage"), async (req, res, next)
       return res.status(404).json({ error: "Folder tidak ditemukan" });
     }
 
-    // Cegah folder dipindahkan ke dirinya sendiri.
     if (parent_id !== undefined && Number(parent_id) === Number(folderId)) {
       return res.status(400).json({ error: "Folder tidak bisa dipindahkan ke dirinya sendiri" });
     }
