@@ -5,7 +5,7 @@ const { authRequired } = require("../middleware/auth");
 const router = express.Router();
 router.use(authRequired);
 
-// ── GET /api/notifications — semua notifikasi milik user ─────────────────────
+// GET /api/notifications 
 router.get("/", async (req, res, next) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit)  || 100, 200);
@@ -26,7 +26,7 @@ router.get("/", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/notifications/unread-count — badge count saja ───────────────────
+// GET /api/notifications/unread-count
 router.get("/unread-count", async (req, res, next) => {
   try {
     const [[{ cnt }]] = await pool.query(
@@ -37,7 +37,7 @@ router.get("/unread-count", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── POST /api/notifications/read-all — tandai semua dibaca ───────────────────
+// POST /api/notifications/read-all 
 router.post("/read-all", async (req, res, next) => {
   try {
     await pool.query(
@@ -48,7 +48,7 @@ router.post("/read-all", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── POST /api/notifications/:id/read — tandai satu dibaca ────────────────────
+// POST /api/notifications/:id/read 
 router.post("/:id/read", async (req, res, next) => {
   try {
     const id = parseInt(req.params.id);
@@ -67,7 +67,7 @@ router.post("/:id/read", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── DELETE /api/notifications/:id — hapus satu notifikasi ────────────────────
+// DELETE /api/notifications/:id 
 router.delete("/:id", async (req, res, next) => {
   try {
     const id = parseInt(req.params.id);

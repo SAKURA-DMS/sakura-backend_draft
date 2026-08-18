@@ -1,27 +1,3 @@
-/**
- * Script perbaikan satu kali untuk data lama.
- *
- * Masalah: ada baris `approval_requests` yang masih berstatus 'pending'
- * padahal dokumen terkait (`documents.status`) sudah final (Diarsipkan/Ditolak),
- * karena pernah diputuskan lewat jalur lain (mis. endpoint /api/documents/:id/approve
- * yang hanya pernah update sebagian baris pending, atau percobaan approve ganda).
- *
- * Akibatnya:
- *  - Halaman "Antrian Persetujuan" (pending) menampilkan dokumen yang
- *    sebenarnya sudah diputuskan.
- *  - Klik "Setujui"/"Tolak" pada baris tersebut selalu gagal dengan error
- *    "Dokumen tidak dalam status Menunggu".
- *  - Halaman "Disetujui" (riwayat approved/rejected) kosong karena baris
- *    approval_requests yang relevan tidak pernah berstatus approved/rejected.
- *
- * Cara pakai:
- *   cd backend
- *   node scripts/fix-orphan-approvals.js
- *
- * Script ini IDEMPOTENT — aman dijalankan berkali-kali, hanya akan mengubah
- * baris yang benar-benar tidak konsisten.
- */
-
 require("dotenv").config();
 const pool = require("../config/db");
 

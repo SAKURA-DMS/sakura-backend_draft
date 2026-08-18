@@ -1,19 +1,3 @@
-/**
- * Migration: tambah fitur Online Status.
- *
- * Menambahkan kolom `is_online` dan `last_seen_at` ke tabel `users`
- * untuk database yang SUDAH ADA (sudah pernah di-migrate sebelumnya).
- * Instalasi baru tidak perlu menjalankan script ini karena kolom ini
- * sudah ada langsung di database/sakura_dms.sql.
- *
- * Cara pakai:
- *   cd backend
- *   node scripts/add-online-status.js
- *
- * Script ini IDEMPOTENT — aman dijalankan berkali-kali. Jika kolom
- * sudah ada, script akan melewatinya tanpa error.
- */
-
 require("dotenv").config();
 const pool = require("../config/db");
 

@@ -10,7 +10,7 @@ const { logActivity } = require("../utils/auditLog");
 
 const router = express.Router();
 
-// ── Rate limiter khusus OTP ───────────────────────────────────────────────────
+// Rate limiter khusus OTP
 const otpLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 5,
@@ -19,7 +19,7 @@ const otpLimiter = rateLimit({
   message: { error: "Terlalu banyak permintaan OTP. Coba lagi dalam 10 menit." },
 });
 
-// ── Schema validasi ───────────────────────────────────────────────────────────
+// Validation schema
 const registerSchema = z.object({
   nama:       z.string().min(2).max(120),
   email:      z.string().email().max(150),
@@ -38,7 +38,7 @@ const otpSchema = z.object({
   otp: z.string().length(6).regex(/^\d{6}$/, "OTP harus 6 digit angka"),
 });
 
-// ── POST /api/auth/register ───────────────────────────────────────────────────
+// POST /api/auth/register 
 router.post("/register", async (req, res, next) => {
   let conn;
   try {
@@ -77,7 +77,7 @@ router.post("/register", async (req, res, next) => {
   }
 });
 
-// ── POST /api/auth/login ──────────────────────────────────────────────────────
+// POST /api/auth/login
 router.post("/login", async (req, res, next) => {
   try {
     const { identifier, password } = loginSchema.parse(req.body);
@@ -106,7 +106,7 @@ router.post("/login", async (req, res, next) => {
       return res.status(403).json({ error: "Akun dinonaktifkan" });
     }
 
-    // ── 2FA aktif: kirim OTP, tunda JWT ──────────────────────────────────────
+    // 2FA active: send OTP, do not issue JWT yet
     if (user.is_2fa_enabled) {
       const otpPlain  = generateOtp();
       const otpHash   = await hashOtp(otpPlain);
@@ -134,13 +134,9 @@ router.post("/login", async (req, res, next) => {
       });
     }
 
-    // ── 2FA tidak aktif: langsung issue JWT ────────────────────────────────
+    // 2FA not active: issue JWT immediately
     const token = signToken(user);
 
-    // Update status online & catat audit log TIDAK di-await agar response
-    // login tidak menunggu 2 query tambahan (ini bagian dari optimasi
-    // kecepatan login — lihat Task 3). Kegagalan di sini tidak boleh
-    // menggagalkan login itu sendiri, jadi cukup dicatat ke console.
     pool.query(
       "UPDATE users SET is_online = 1, last_seen_at = NOW() WHERE id = ?",
       [user.id]
@@ -162,7 +158,7 @@ router.post("/login", async (req, res, next) => {
   }
 });
 
-// ── POST /api/auth/verify-otp ─────────────────────────────────────────────────
+// POST /api/auth/verify-otp
 router.post("/verify-otp", otpLimiter, async (req, res, next) => {
   try {
     const schema = z.object({
@@ -227,7 +223,7 @@ router.post("/verify-otp", otpLimiter, async (req, res, next) => {
   }
 });
 
-// ── POST /api/auth/send-otp ───────────────────────────────────────────────────
+// POST /api/auth/send-otp
 router.post("/send-otp", otpLimiter, async (req, res, next) => {
   try {
     let userId, userEmail, userName;
@@ -286,7 +282,7 @@ router.post("/send-otp", otpLimiter, async (req, res, next) => {
   }
 });
 
-// ── POST /api/auth/enable-2fa ─────────────────────────────────────────────────
+// POST /api/auth/enable-2fa
 router.post("/enable-2fa", authRequired, otpLimiter, async (req, res, next) => {
   try {
     const { otp } = otpSchema.parse(req.body);
@@ -327,7 +323,7 @@ router.post("/enable-2fa", authRequired, otpLimiter, async (req, res, next) => {
   }
 });
 
-// ── POST /api/auth/disable-2fa ────────────────────────────────────────────────
+// POST /api/auth/disable-2fa 
 router.post("/disable-2fa", authRequired, async (req, res, next) => {
   try {
     const schema = z.object({ password: z.string().min(1) });
@@ -357,12 +353,12 @@ router.post("/disable-2fa", authRequired, async (req, res, next) => {
   }
 });
 
-// ── POST /api/auth/logout ─────────────────────────────────────────────────────
+// POST /api/auth/logout 
 router.post("/logout", authRequired, async (req, res, next) => {
   try {
     await pool.query("UPDATE users SET is_online = 0 WHERE id = ?", [req.user.id]);
 
-    // Fire-and-forget: jangan tahan response logout hanya demi menulis audit log.
+    // Fire-and-forget: jangan tahan response logout hanya demi menulis audit log
     logActivity(pool, {
       documentId: null,
       userId: req.user.id,
@@ -375,7 +371,7 @@ router.post("/logout", authRequired, async (req, res, next) => {
   }
 });
 
-// ── GET /api/auth/me ──────────────────────────────────────────────────────────
+// GET /api/auth/me 
 router.get("/me", authRequired, async (req, res, next) => {
   try {
     await pool.query(
@@ -400,7 +396,7 @@ router.get("/me", authRequired, async (req, res, next) => {
   }
 });
 
-// ── POST /api/auth/change-password ───────────────────────────────────────────
+// POST /api/auth/change-password
 router.post("/change-password", authRequired, async (req, res, next) => {
   try {
     const schema = z.object({
@@ -424,13 +420,7 @@ router.post("/change-password", authRequired, async (req, res, next) => {
   }
 });
 
-// ── POST /api/auth/refresh-session ────────────────────────────────────────────
-// Dipanggil frontend secara berkala SELAMA user masih aktif (klik, mousemove,
-// keyboard, scroll, atau request API apa pun) untuk memperpanjang masa
-// berlaku token tanpa perlu login ulang. Ini yang membuat "idle 12 jam" bisa
-// bersifat sliding: selama user aktif, sesi terus diperpanjang; begitu user
-// benar-benar diam selama 12 jam, frontend berhenti memanggil endpoint ini
-// dan token lama-lama kedaluwarsa dengan sendirinya (lihat useIdleSession.js).
+// POST /api/auth/refresh-session
 router.post("/refresh-session", authRequired, async (req, res, next) => {
   try {
     const [rows] = await pool.query(
@@ -446,7 +436,7 @@ router.post("/refresh-session", authRequired, async (req, res, next) => {
   }
 });
 
-// ── Helper ────────────────────────────────────────────────────────────────────
+// Helper 
 function _publicUser(user) {
   return {
     id:                 user.id,

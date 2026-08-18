@@ -1,9 +1,4 @@
-/**
- * utils/chatIntent.js
- *
- * Intent detector untuk navigasi SAKURA AI.
- */
-
+// Intent detector untuk navigasi SAKURA AI
 const ROUTE_MAP = {
   upload: { keys: ["upload", "upload dokumen", "unggah", "unggah dokumen", "halaman upload"], path: "/upload", label: "Buka halaman Upload" },
   dashboard: { keys: ["dashboard", "beranda utama", "grafik statistik", "grafik dokumen"], path: "/dashboard", label: "Buka Dashboard" },

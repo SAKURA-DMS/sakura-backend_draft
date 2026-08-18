@@ -8,9 +8,7 @@ const router = express.Router();
 
 router.use(authRequired);
 
-// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/users — list semua user aktif & nonaktif (admin)
-// ─────────────────────────────────────────────────────────────────────────────
 router.get("/", requirePermission("users.view"), async (_req, res, next) => {
   try {
     const [rows] = await pool.query(
@@ -26,9 +24,7 @@ router.get("/", requirePermission("users.view"), async (_req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/users/pending — user yang menunggu approval
-// ─────────────────────────────────────────────────────────────────────────────
 router.get("/pending", requirePermission("users.approve"), async (_req, res, next) => {
   try {
     const [rows] = await pool.query(
@@ -39,9 +35,7 @@ router.get("/pending", requirePermission("users.approve"), async (_req, res, nex
   } catch (e) { next(e); }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/users — buat user baru 
-// ─────────────────────────────────────────────────────────────────────────────
 router.post("/", requirePermission("users.manage"), async (req, res, next) => {
   let conn;
   try {
@@ -66,21 +60,18 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
       return res.status(400).json({ error: "NIP wajib diisi untuk role Guru." });
     }
 
-    // Cek email unik
+    // Check unique email
     const [existing] = await pool.query("SELECT id FROM users WHERE email = ?", [email.trim()]);
     if (existing.length) {
       return res.status(409).json({ error: "Email sudah terdaftar." });
     }
 
-    // Hash password — gunakan default jika tidak disediakan. Jika admin
-    // tidak mengisi password custom, akun ini memakai password default
-    // (Sakura@123) sehingga user WAJIB menggantinya saat login pertama.
+    // Default password handling
     const usingDefaultPassword = !password?.trim();
     const rawPassword = password?.trim() || "Sakura@123";
     const passwordHash = await bcrypt.hash(rawPassword, 10);
 
-    // users.id BUKAN AUTO_INCREMENT — hitung id berikutnya secara manual,
-    // dibungkus transaksi + FOR UPDATE supaya aman dari race condition.
+    // users.id NOT AUTO_INCREMENT 
     conn = await pool.getConnection();
     await conn.beginTransaction();
 
@@ -120,9 +111,7 @@ router.post("/", requirePermission("users.manage"), async (req, res, next) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/users/:id/activate
-// ─────────────────────────────────────────────────────────────────────────────
 router.post("/:id/activate", requirePermission("users.approve"), async (req, res, next) => {
   try {
     const { role } = req.body || {};
@@ -134,9 +123,7 @@ router.post("/:id/activate", requirePermission("users.approve"), async (req, res
   } catch (e) { next(e); }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DELETE /api/users/:id/reject — tolak registrasi
-// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/users/:id/reject - rejecting registration requests
 router.delete("/:id/reject", requirePermission("users.approve"), async (req, res, next) => {
   try {
     await pool.query("DELETE FROM users WHERE id = ? AND status = 'menunggu_approval'", [req.params.id]);
@@ -144,9 +131,7 @@ router.delete("/:id/reject", requirePermission("users.approve"), async (req, res
   } catch (e) { next(e); }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DELETE /api/users/:id — hapus user permanent 
-// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/users/:id - deleting user permanent 
 router.delete("/:id", requirePermission("users.manage"), async (req, res, next) => {
   try {
     const targetId = Number(req.params.id);
@@ -164,9 +149,7 @@ router.delete("/:id", requirePermission("users.manage"), async (req, res, next) 
   } catch (e) { next(e); }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/users/:id/role
-// ─────────────────────────────────────────────────────────────────────────────
 router.patch("/:id/role", requirePermission("users.manageRole"), async (req, res, next) => {
   try {
     const { role } = req.body;
@@ -176,9 +159,7 @@ router.patch("/:id/role", requirePermission("users.manageRole"), async (req, res
   } catch (e) { next(e); }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PATCH /api/users/:id/avatar — user hanya boleh update avatar miliknya
-// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/users/:id/avatar
 router.patch("/:id/avatar", async (req, res, next) => {
   try {
     if (Number(req.params.id) !== req.user.id) {
@@ -190,16 +171,14 @@ router.patch("/:id/avatar", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PATCH /api/users/:id — update profil 
-// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/users/:id - update profil 
 router.patch("/:id", async (req, res, next) => {
   try {
     const targetId = Number(req.params.id);
     const isSelf = targetId === req.user.id;
 
     if (!isSelf) {
-      // butuh permission users.manage
+      // need permission users.manage
       const [perm] = await pool.query(
         `SELECT 1 FROM role_permissions rp JOIN permissions p ON p.permission_id = rp.permission_id
          WHERE rp.role_name = ? AND p.permission_key = 'users.manage'`,

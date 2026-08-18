@@ -1,22 +1,3 @@
-/**
- * routes/presence.js — Online Status (Fase Online Status)
- * ─────────────────────────────────────────────────────────────────────────────
- * Solusi RINGAN tanpa WebSocket:
- *  • Frontend mengirim heartbeat berkala (lihat usePresence di AppContext) selagi
- *    tab aktif → menandai user online + memperbarui last_seen_at.
- *  • Status "online" dianggap valid hanya jika last_seen_at masih dalam jendela
- *    PRESENCE_TTL_SECONDS detik terakhir. Ini membuat status otomatis berubah
- *    jadi offline tanpa perlu cron job/scheduler terpisah — cukup dihitung
- *    saat dibaca (query-time expiry).
- *  • Dipanggil juga secara eksplisit saat:
- *      - login           → POST /presence/heartbeat (langsung setelah dapat token)
- *      - logout           → POST /presence/offline
- *      - browser ditutup  → POST /presence/offline lewat navigator.sendBeacon
- *      - token/session habis → request berikutnya gagal 401, frontend berhenti
- *        mengirim heartbeat sehingga TTL akan membuatnya offline otomatis.
- * ─────────────────────────────────────────────────────────────────────────────
- */
-
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
@@ -24,20 +5,10 @@ const { authRequired } = require("../middleware/auth");
 
 const router = express.Router();
 
-// Berapa detik tanpa heartbeat sebelum user dianggap offline meski is_online=1.
-// Harus lebih besar dari interval heartbeat frontend (lihat HEARTBEAT_INTERVAL_MS
-// di AppContext.jsx) supaya tidak flicker offline di antara dua heartbeat.
+
 const PRESENCE_TTL_SECONDS = 45;
 
-// ── POST /api/presence/offline-beacon?token=... ──────────────────────────────
-// Versi khusus dari /offline untuk dipanggil lewat navigator.sendBeacon saat
-// tab/browser ditutup (event 'pagehide'). sendBeacon TIDAK BISA menyertakan
-// header custom seperti "Authorization: Bearer ...", jadi token JWT dikirim
-// lewat query string dan diverifikasi manual di sini (bukan via middleware
-// authRequired yang membaca header).
-//
-// Endpoint ini didaftarkan SEBELUM router.use(authRequired) di bawah supaya
-// tidak ikut diwajibkan header Authorization.
+// POST /api/presence/offline-beacon?token=...
 router.post("/offline-beacon", express.text(), async (req, res) => {
   try {
     const token = req.query.token;
@@ -58,7 +29,7 @@ router.post("/offline-beacon", express.text(), async (req, res) => {
 
 router.use(authRequired);
 
-// ── POST /api/presence/heartbeat — tandai diri sendiri online ────────────────
+// POST /api/presence/heartbeat — tandai diri sendiri online 
 router.post("/heartbeat", async (req, res, next) => {
   try {
     await pool.query(
@@ -69,10 +40,7 @@ router.post("/heartbeat", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── POST /api/presence/offline — tandai diri sendiri offline ─────────────────
-// Dipanggil saat logout eksplisit ATAU lewat navigator.sendBeacon saat tab/
-// browser ditutup. sendBeacon mengirim sebagai text/plain, body bisa kosong,
-// jadi endpoint ini tidak butuh payload apa pun selain token JWT.
+// POST /api/presence/offline 
 router.post("/offline", async (req, res, next) => {
   try {
     await pool.query(
@@ -83,9 +51,7 @@ router.post("/offline", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// ── GET /api/presence/status?ids=1,2,3 — cek status banyak user sekaligus ────
-// Jika `ids` tidak diisi, mengembalikan status SELURUH user (dipakai halaman
-// seperti User Management / System Log yang menampilkan banyak avatar).
+// GET /api/presence/status?ids=1,2,3
 router.get("/status", async (req, res, next) => {
   try {
     const { ids } = req.query;

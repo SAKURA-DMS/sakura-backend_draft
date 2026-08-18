@@ -18,10 +18,10 @@ async function verifySmtp() {
 /**
  * Template HTML email OTP.
  *
- * @param {string} namaUser  - Nama user penerima
- * @param {string} otpCode   - 6-digit OTP plaintext
- * @param {number} expiryMin - Masa berlaku dalam menit
- * @returns {string} HTML string
+ * @param {string} namaUser  
+ * @param {string} otpCode  
+ * @param {number} expiryMin 
+ * @returns {string} 
  */
 function buildOtpEmailHtml(namaUser, otpCode, expiryMin = 5) {
   return `

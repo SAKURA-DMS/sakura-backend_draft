@@ -2,16 +2,8 @@ const { GoogleGenAI } = require("@google/genai");
 
 const DEFAULT_MODEL      = "gemini-2.5-flash";
 const DEFAULT_TIMEOUT_MS = 25000;
-// FIX: timeout khusus untuk OCR Vision (gambar butuh waktu proses lebih lama
-// dibanding request teks biasa, dan panggilan PERTAMA ke Gemini setelah
-// server nyala harus menanggung cold-start TLS/DNS di atas waktu analisis
-// gambar itu sendiri). Root cause "OCR gagal di percobaan pertama, sukses
-// saat 'Coba Lagi'": DEFAULT_TIMEOUT_MS=25000 terlalu ketat untuk kombinasi
-// cold-start + analisis gambar pada request pertama. Lihat juga
-// warmupGemini() di bawah, dipanggil sekali saat server start (server.js).
+
 const DEFAULT_VISION_TIMEOUT_MS = 35000;
-// FIX: kurangi retry — 1 retry saja (bukan 2).
-// Dengan MAX_RETRIES=2 sebelumnya, 1 request user = 3 panggilan Gemini → cepat kena rate limit.
 const MAX_RETRIES = 1;
 
 let client       = null;
@@ -46,11 +38,8 @@ function normalizeGeminiError(err, model, attempt) {
   return e;
 }
 
-// FIX: hapus 429 dari daftar retryable!
-// Sebelumnya isRetryable(429)=true → saat kena rate limit malah terus retry → makin kena limit.
 function isRetryable(status) {
   return status === 0 || status === 408 || status >= 500;
-  // 429 TIDAK di-retry — langsung lempar error agar frontend dapat respons cepat
 }
 
 function extractText(response) {
@@ -71,9 +60,6 @@ async function callGemini({ systemPrompt, userMessage, apiKey, model, timeoutMs,
       config: {
         systemInstruction: systemPrompt,
         temperature: 0.3,
-        // FIX: naikkan dari 512 → 1024.
-        // 512 terlalu kecil untuk respons JSON lengkap → JSON terpotong di tengah →
-        // parse gagal → raw JSON tampil di chat user.
         maxOutputTokens: 1024,
       },
       signal: controller.signal,
@@ -111,11 +97,7 @@ async function callGemini({ systemPrompt, userMessage, apiKey, model, timeoutMs,
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OCR (Gemini Vision) — dipakai oleh routes/ocr.js untuk membaca dokumen hasil
-// scan (Ijazah SMP, SKL, Sertifikat, Transkrip/Rekap Nilai).
-// ─────────────────────────────────────────────────────────────────────────────
-
+// OCR (Gemini Vision) 
 const OCR_SYSTEM_PROMPT = `Kamu adalah OCR engine untuk sistem Document Management sekolah.
 
 Analisis gambar dokumen yang diberikan.
@@ -232,11 +214,11 @@ async function callGeminiVision({ imagePart, apiKey, model, timeoutMs, attempt }
 }
 
 /**
- * Kirim gambar dokumen ke Gemini Vision dan kembalikan objek hasil OCR
+ * Send a document image to Gemini Vision and return the OCR result objects.
  * ({ document_type, confidence, fields } atau { document_type: "unsupported", message }).
  *
- * @param {string} base64Image - data gambar dalam base64 (tanpa prefix data:...)
- * @param {string} mimeType - contoh: "image/jpeg", "image/png"
+ * @param {string} base64Image 
+ * @param {string} mimeType 
  */
 async function analyzeDocumentImage(base64Image, mimeType) {
   const apiKey = getApiKey();
@@ -248,7 +230,7 @@ async function analyzeDocumentImage(base64Image, mimeType) {
   }
 
   const model      = getModel();
-  // FIX: pakai timeout khusus vision (35s), bukan timeout teks biasa (25s).
+  // FIX: use the specific vision timeout (35s), not the standard text timeout (25s).
   const timeoutMs  = getVisionTimeoutMs();
   const imagePart  = { inlineData: { data: base64Image, mimeType: mimeType || "image/jpeg" } };
   let lastError    = null;
@@ -300,7 +282,7 @@ async function askGemini(systemPrompt, userMessage) {
       console.error("[GeminiService] request failed", { model, attempt, status, message: err.message });
 
       if (attempt > MAX_RETRIES || !isRetryable(status)) break;
-      // Exponential backoff: tunggu lebih lama di attempt berikutnya
+      // Exponential backoff: wait longer for the next attempt.
       await sleep(1500 * attempt);
     }
   }
@@ -311,21 +293,7 @@ async function askGemini(systemPrompt, userMessage) {
   throw lastError || new Error("Gemini gagal memproses permintaan.");
 }
 
-/**
- * Warm-up koneksi Gemini saat server start (dipanggil sekali dari server.js,
- * mengikuti pola verifySmtp()/checkConnection() yang sudah ada di project ini).
- *
- * FIX untuk root cause "OCR gagal di percobaan pertama, sukses di 'Coba Lagi'":
- * client GoogleGenAI sebelumnya baru pertama kali melakukan DNS lookup + TLS
- * handshake saat request OCR PERTAMA dari user masuk. Overhead cold-start ini
- * digabung dengan waktu analisis gambar oleh Gemini sering melebihi timeout,
- * sehingga percobaan pertama gagal sedangkan percobaan kedua (koneksi sudah
- * "hangat") berhasil. Dengan warm-up non-fatal di sini, koneksi sudah siap
- * sebelum user pertama kali melakukan scan OCR.
- *
- * Non-fatal: kalau GEMINI_API_KEY belum diset atau warm-up gagal, server tetap
- * jalan normal — OCR akan tetap dicoba seperti biasa saat user pakai fitur ini.
- */
+// Warm up the Gemini API (called once upon server startup in server.js) to reduce TLS/DNS cold-start delays for the first request.
 async function warmupGemini() {
   const apiKey = getApiKey();
   if (!apiKey || apiKey === "your-gemini-api-key-here" || !apiKey.trim()) {

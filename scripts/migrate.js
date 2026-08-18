@@ -15,16 +15,14 @@ const bcrypt = require("bcrypt");
   });
 
   try {
-    // Jalankan sakura_dms.sql (berisi CREATE DATABASE + semua tabel + data seed)
+    // Run sakura_dms.sql (containing CREATE DATABASE + all tables + seed data)
     const sqlFile = path.join(__dirname, "..", "database", "sakura_dms.sql");
     const sql = fs.readFileSync(sqlFile, "utf8");
     await conn.query(sql);
     console.log(" Berhasil menjalankan: sakura_dms.sql");
 
-    // Pastikan pakai database sakura_dms
     await conn.query("USE sakura_dms");
 
-    // Regenerate password hash untuk user demo agar pasti valid di env ini
     const hash = await bcrypt.hash("password123", 10);
     await conn.query(
       "UPDATE users SET password_hash = ? WHERE email IN (?, ?, ?)",

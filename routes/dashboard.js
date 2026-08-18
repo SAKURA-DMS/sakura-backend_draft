@@ -5,16 +5,6 @@ const { authRequired } = require("../middleware/auth");
 const router = express.Router();
 router.use(authRequired);
 
-// ── Helper: filter dokumen berdasarkan role ──────────────────────────────────
-//
-// Aturan akses Guru disamakan dengan Archive:
-//
-// 1. Semua dokumen kategori Data Siswa (category_id = 1) dapat dilihat Guru.
-// 2. Untuk kategori lain, Guru dapat melihat:
-//    - dokumen yang di-upload sendiri, ATAU
-//    - dokumen yang dirinya terdaftar sebagai owner di document_owners.
-// 3. Operator/TU & Kepala Sekolah tetap memiliki akses seperti sebelumnya.
-//
 function buildOwnerFilter(user) {
   if (user.role === "Guru") {
     return {
@@ -39,7 +29,7 @@ function buildOwnerFilter(user) {
   };
 }
 
-// ── GET /api/dashboard/stats ─────────────────────────────────────────────────
+// GET /api/dashboard/stats 
 router.get("/stats", async (req, res, next) => {
   try {
     const { clause, params } = buildOwnerFilter(req.user);
@@ -71,7 +61,7 @@ router.get("/stats", async (req, res, next) => {
   }
 });
 
-// ── GET /api/dashboard/chart ─────────────────────────────────────────────────
+// GET /api/dashboard/chart 
 router.get("/chart", async (req, res, next) => {
   try {
     const { period = "weekly", from, to } = req.query;
@@ -87,7 +77,7 @@ router.get("/chart", async (req, res, next) => {
 
     let toDate = to ? new Date(to) : new Date();
 
-    // Pastikan toDate >= fromDate
+    // Ensure toDate >= fromDate
     if (toDate < fromDate) {
       const tmp = fromDate;
       fromDate = toDate;
@@ -98,7 +88,7 @@ router.get("/chart", async (req, res, next) => {
     const toStr   = toDate.toISOString().slice(0, 10);
 
     if (period === "weekly") {
-      // Per-hari: count upload (created_at) per status
+      // Per-day: count upload (created_at) per status
       const [rows] = await pool.query(
         `SELECT
           DATE(d.created_at) AS date,
@@ -212,7 +202,7 @@ router.get("/chart", async (req, res, next) => {
   }
 });
 
-// ── GET /api/dashboard/activity ──────────────────────────────────────────────
+// GET /api/dashboard/activity
 router.get("/activity", async (req, res, next) => {
   try {
     const limit = Math.min(

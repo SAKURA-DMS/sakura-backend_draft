@@ -1,23 +1,9 @@
 const { generateAuditHash } = require("./auditHash");
 
 /**
- * utils/auditLog.js
- *
- * Helper terpusat untuk mencatat aktivitas ke `audit_trail` untuk kasus-kasus
- * yang TIDAK terikat pada satu dokumen (login, logout, folder create/rename/
- * delete, OCR scan). Dibuat terpisah dari `addAudit` lokal yang sudah ada di
- * routes/documents.js dan routes/approvals.js supaya:
- *   - logic audit yang sudah berjalan untuk dokumen (upload/edit/delete/
- *     restore/approve/reject/download) TIDAK disentuh sama sekali.
- *   - route baru (auth, folders, ocr) punya satu cara konsisten untuk
- *     menulis log tanpa duplikasi kode.
- *
- * Catatan: memerlukan migration `migration_audit_trail_nullable_document_id.sql`
- * supaya kolom document_id boleh NULL.
- *
  * @param {import('mysql2/promise').Pool|import('mysql2/promise').PoolConnection} conn
  * @param {Object} params
- * @param {number|null} [params.documentId]        - null jika aktivitas tidak terikat dokumen
+ * @param {number|null} [params.documentId]       
  * @param {number|null} params.userId
  * @param {string} params.action
  * @param {number|null} [params.approvalRequestId]

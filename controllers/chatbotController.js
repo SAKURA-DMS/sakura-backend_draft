@@ -1,12 +1,8 @@
 const { classifyIntent } = require("../utils/chatIntent");
 const { askGemini } = require("../services/geminiService");
 
-// Sesuaikan path db jika project kamu memakai nama file berbeda.
 const db = require("../config/db");
 
-/**
- * Normalisasi text.
- */
 function normalize(value = "") {
   return String(value)
     .toLowerCase()
@@ -14,19 +10,10 @@ function normalize(value = "") {
     .replace(/\s+/g, " ");
 }
 
-/**
- * Escape LIKE search.
- */
 function makeSearchTerm(value = "") {
   return `%${String(value).trim()}%`;
 }
 
-/**
- * Mengambil hasil query dengan aman.
- * Mendukung mysql2/promise:
- *
- * const [rows] = await db.query(...)
- */
 async function queryRows(sql, params = []) {
   const result = await db.query(sql, params);
 
@@ -42,17 +29,7 @@ async function queryRows(sql, params = []) {
   return result?.rows || [];
 }
 
-/**
- * Response helper.
- *
- * Frontend tetap menerima format:
- * {
- *   reply,
- *   links,
- *   documents,
- *   type
- * }
- */
+// Response helper 
 function sendReply(res, {
   reply,
   type = "text",
@@ -69,11 +46,7 @@ function sendReply(res, {
   });
 }
 
-/* ============================================================
- * INTENT DETECTION
- * ============================================================
- */
-
+// Intent detection helpers
 function isStatisticsIntent(message) {
   const lower = normalize(message);
 
@@ -129,17 +102,7 @@ function isGenericSearchRequest(message) {
   ].includes(lower);
 }
 
-/**
- * Ambil keyword pencarian dari pesan.
- *
- * Contoh:
- *
- * "cari dokumen Ijazah Iqbal Fachrozi"
- * -> "Ijazah Iqbal Fachrozi"
- *
- * "carikan Ijazah Iqbal Fachrozi"
- * -> "Ijazah Iqbal Fachrozi"
- */
+//  Extract the search keyword from the message
 function extractSearchKeyword(message) {
   let keyword = String(message || "").trim();
 
@@ -187,11 +150,7 @@ function extractSearchKeyword(message) {
     .trim();
 }
 
-/* ============================================================
- * NAVIGATION
- * ============================================================
- */
-
+// Navigation
 function buildNavigationReply(intent) {
   const label =
     intent?.link?.label ||
@@ -237,19 +196,8 @@ function buildNavigationReply(intent) {
   };
 }
 
-/* ============================================================
- * STATISTICS
- * ============================================================
- */
-
+// Statistics
 async function getStatistics() {
-  /*
-   * Kita ambil seluruh dokumen non-trash supaya statistik chatbot
-   * berasal dari database, BUKAN Gemini.
-   *
-   * Jika nama tabel kamu "documents", query ini langsung cocok.
-   */
-
   const rows = await queryRows(`
     SELECT *
     FROM documents
@@ -343,11 +291,6 @@ async function handleStatistics(res) {
       error
     );
 
-    /*
-     * Kalau struktur kolom deleted_at berbeda,
-     * fallback query sederhana.
-     */
-
     try {
       const rows = await queryRows(`
         SELECT *
@@ -393,11 +336,7 @@ async function handleStatistics(res) {
   }
 }
 
-/* ============================================================
- * HELP / CARA MENGGUNAKAN SAKURA
- * ============================================================
- */
-
+// Bantuan Penggunaan SAKURA
 function handleHelp(res) {
   const reply = [
     "SAKURA digunakan untuk mengelola arsip dokumen sekolah secara digital.",
@@ -438,31 +377,13 @@ function handleHelp(res) {
   });
 }
 
-/* ============================================================
- * DOCUMENT SEARCH
- * ============================================================
- */
-
+// Document search
 async function searchDocuments(keyword) {
   if (!keyword) {
     return [];
   }
 
   const search = makeSearchTerm(keyword);
-
-  /*
-   * PENTING:
-   *
-   * TIDAK ADA FILTER status = "Diarsipkan".
-   *
-   * Jadi dokumen:
-   * - Diarsipkan
-   * - Ditolak
-   * - Menunggu
-   * - Disetujui
-   *
-   * semuanya tetap dapat ditemukan.
-   */
 
   try {
     return await queryRows(
@@ -486,9 +407,6 @@ async function searchDocuments(keyword) {
       error
     );
 
-    /*
-     * Fallback jika schema memakai camelCase.
-     */
     try {
       return await queryRows(
         `
@@ -510,9 +428,6 @@ async function searchDocuments(keyword) {
         fallbackError
       );
 
-      /*
-       * Fallback terakhir: ambil semua lalu filter JS.
-       */
       const rows = await queryRows(`
         SELECT *
         FROM documents
@@ -647,11 +562,6 @@ async function handleDocumentSearch(
     const documents =
       rows.map(mapDocument);
 
-    /*
-     * Kalau hanya satu hasil:
-     * tampilkan detail seperti UI lama.
-     */
-
     if (documents.length === 1) {
       const doc = documents[0];
 
@@ -673,19 +583,6 @@ async function handleDocumentSearch(
         ],
       });
     }
-
-    /*
-     * Kalau ada beberapa dokumen dengan judul sama,
-     * SEMUANYA dikembalikan.
-     *
-     * Ini penting untuk kasus:
-     * "Ijazah Iqbal Fachrozi"
-     *
-     * yang mungkin punya:
-     * - satu Diarsipkan
-     * - satu Ditolak
-     * - status lainnya
-     */
 
     const summary =
       documents
@@ -737,29 +634,18 @@ async function handleDocumentSearch(
   }
 }
 
-/* ============================================================
- * GEMINI FALLBACK
- * ============================================================
- */
-
+// Gemini fallback: just use for free-form conversation, not for statistics, search, help, or navigation
 async function handleGeminiFallback(
   res,
   message,
   history = []
 ) {
   try {
-    /*
-     * Gemini HANYA digunakan untuk percakapan bebas.
-     *
-     * Statistik, search, bantuan, dan navigasi
-     * tidak melewati Gemini.
-     */
-
     const systemPrompt = `Kamu adalah SAKURA AI Assistant untuk sistem manajemen arsip digital SMP Negeri 4 Cikarang Barat.
-Jawab dalam Bahasa Indonesia yang singkat, natural, ramah, dan mudah dibaca di chatbot kecil.\nGunakan teks biasa. Jangan gunakan Markdown seperti tanda **, heading, atau format tebal. Jangan gunakan em dash. Gunakan kata "kamu", bukan "Anda". Jangan selalu membuka jawaban dengan "Halo!" atau pembuka generik.
-Kamu memahami fitur SAKURA: Dashboard, Upload Dokumen, Scan Dokumen, Arsip, Persetujuan, Pengguna, Role, Log Aktivitas, Notifikasi, Kotak Sampah, Profil, dan Pengaturan.
-Jangan mengarang data dokumen, statistik, lokasi tombol, atau fitur yang tidak diberikan sistem. Jangan memberikan kredensial atau informasi teknis sensitif.
-Jika pertanyaan berkaitan dengan cara menggunakan SAKURA, jelaskan berdasarkan fitur-fitur tersebut dan jangan mengatakan bahwa kamu tidak tahu.`;
+    Jawab dalam Bahasa Indonesia yang singkat, natural, ramah, dan mudah dibaca di chatbot kecil.\nGunakan teks biasa. Jangan gunakan Markdown seperti tanda **, heading, atau format tebal. Jangan gunakan em dash. Gunakan kata "kamu", bukan "Anda". Jangan selalu membuka jawaban dengan "Halo!" atau pembuka generik.
+    Kamu memahami fitur SAKURA: Dashboard, Upload Dokumen, Scan Dokumen, Arsip, Persetujuan, Pengguna, Role, Log Aktivitas, Notifikasi, Kotak Sampah, Profil, dan Pengaturan.
+    Jangan mengarang data dokumen, statistik, lokasi tombol, atau fitur yang tidak diberikan sistem. Jangan memberikan kredensial atau informasi teknis sensitif.
+    Jika pertanyaan berkaitan dengan cara menggunakan SAKURA, jelaskan berdasarkan fitur-fitur tersebut dan jangan mengatakan bahwa kamu tidak tahu.`;
 
     const historyText = Array.isArray(history)
       ? history.slice(-6).map((item) => `${item?.role === "assistant" ? "Assistant" : "User"}: ${String(item?.content || "")}`).join("\n")
@@ -808,9 +694,7 @@ Jika pertanyaan berkaitan dengan cara menggunakan SAKURA, jelaskan berdasarkan f
       error
     );
 
-    /*
-     * Gemini 429 tidak boleh membuat seluruh chatbot mati.
-     */
+    // Fallback if Gemini 429 or rate limit
     if (
       error?.status === 429 ||
       error?.response?.status === 429 ||
@@ -841,18 +725,7 @@ Jika pertanyaan berkaitan dengan cara menggunakan SAKURA, jelaskan berdasarkan f
   }
 }
 
-/* ============================================================
- * CONTEXTUAL FOLLOW-UP NAVIGATION
- * ============================================================
- *
- * Hanya menangani referensi ke konteks sebelumnya, misalnya:
- * - "coba antar aku ke sana"
- * - "buka itu"
- * - "antar ke situ"
- * - "buka yang tadi"
- *
- * Tidak mengubah intent navigasi biasa.
- */
+// Contextual navigation: "buka itu", "antar aku ke sana", etc.
 function isContextualNavigationRequest(message) {
   const lower = normalize(message);
 
@@ -901,11 +774,7 @@ function getLastContextLink(history = []) {
   return null;
 }
 
-/* ============================================================
- * MAIN CHAT HANDLER
- * ============================================================
- */
-
+// Main chat handler
 async function handleChat(req, res) {
   try {
     const {
@@ -927,11 +796,7 @@ async function handleChat(req, res) {
     const cleanMessage =
       message.trim();
 
-    /*
-     * ========================================================
-     * CONTEXT FOLLOW-UP: "antar aku ke sana", "buka itu", dll.
-     * ========================================================
-     */
+    // Contextual navigation: "buka itu", "antar aku ke sana", etc.
     if (isContextualNavigationRequest(cleanMessage)) {
       const previousLink = getLastContextLink(history);
 
@@ -944,16 +809,12 @@ async function handleChat(req, res) {
       }
     }
 
-    /*
-     * ========================================================
-     * PRIORITY 1: STATISTICS
-     * ========================================================
-     *
-     * "Tampilkan statistik dokumen"
-     *
-     * HARUS diproses database.
-     * Tidak boleh kena Gemini 429.
-     */
+    // PRIORITY 1: STATISTICS
+    if (
+      isStatisticsIntent(cleanMessage)
+    ) {
+      return await handleStatistics(res);
+    }
 
     if (
       isStatisticsIntent(cleanMessage)
@@ -961,22 +822,16 @@ async function handleChat(req, res) {
       return await handleStatistics(res);
     }
 
-    /*
-     * ========================================================
-     * PRIORITY 2: HELP
-     * ========================================================
-     */
+    // PRIORITY 2: HELP
+    if (isHelpIntent(cleanMessage)) {
+      return handleHelp(res);
+    }
 
     if (isHelpIntent(cleanMessage)) {
       return handleHelp(res);
     }
 
-    /*
-     * ========================================================
-     * PRIORITY 3: DOCUMENT SEARCH
-     * ========================================================
-     */
-
+    // PRIORITY 3: DOCUMENT SEARCH
     if (isSearchIntent(cleanMessage)) {
       if (isGenericSearchRequest(cleanMessage)) {
         return sendReply(res, {
@@ -992,12 +847,7 @@ async function handleChat(req, res) {
       );
     }
 
-    /*
-     * ========================================================
-     * PRIORITY 4: NAVIGATION
-     * ========================================================
-     */
-
+    // PRIORITY 4: NAVIGATION
     const intent =
       classifyIntent(cleanMessage);
 
@@ -1022,14 +872,7 @@ async function handleChat(req, res) {
       });
     }
 
-    /*
-     * ========================================================
-     * PRIORITY 5: GEMINI
-     * ========================================================
-     *
-     * Hanya percakapan bebas yang sampai sini.
-     */
-
+    // PRIORITY 5: GEMINI
     return await handleGeminiFallback(
       res,
       cleanMessage,

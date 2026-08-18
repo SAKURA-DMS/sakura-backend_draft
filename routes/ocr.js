@@ -1,18 +1,3 @@
-/**
- * routes/ocr.js
- *
- * Endpoint OCR untuk fitur "Isi Data Lengkap" pada form upload.
- * Menggantikan OCR lama (Tesseract.js di frontend, heuristic regex parser)
- * dengan Gemini Vision API yang membaca gambar dokumen langsung di backend.
- *
- * Flow:
- *   1. Frontend mengirim gambar hasil scan (multipart/form-data, field "image").
- *   2. Backend memanggil Gemini Vision (services/geminiService.js) untuk
- *      menentukan jenis dokumen dan mengekstrak metadata-nya.
- *   3. Backend memvalidasi jenis dokumen terhadap daftar yang didukung
- *      (ijazah, skl, sertifikat, transkrip). Selain itu dianggap "unsupported".
- */
-
 const express = require("express");
 const { authRequired } = require("../middleware/auth");
 const upload = require("../middleware/upload");

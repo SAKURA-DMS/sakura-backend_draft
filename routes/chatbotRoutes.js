@@ -4,7 +4,7 @@ const { handleChat }         = require("../controllers/chatbotController");
 
 const router = express.Router();
 
-// Semua route chatbot memerlukan autentikasi JWT
+// All chatbot routes require JWT authentication 
 router.use(authRequired);
 
 // POST /api/chatbot

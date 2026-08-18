@@ -1,31 +1,3 @@
-/**
- * Script migrasi tambahan (idempotent, transactional): pastikan SETIAP baris
- * di `document_types` punya folder sendiri di tabel `folders`, di bawah
- * folder induk kategorinya masing-masing.
- *
- * Kenapa dibutuhkan (lanjutan dari scripts/remove-administrasi-category.js):
- *  - Migrasi sebelumnya memindahkan `category_id` pada document_types &
- *    documents dari "Administrasi" ke "Data Guru"/"Data Siswa" dengan cara
- *    meng-UPDATE baris folder yang SUDAH ADA (supaya folder_id yang sudah
- *    dipakai documents.folder_id tidak berubah).
- *  - Tapi di database production, sebagian jenis dokumen (mis. "Modul Ajar",
- *    "RPP", "Silabus", dst) ternyata TIDAK PERNAH punya baris folder sendiri
- *    dari awal (folder untuk jenis dokumen itu belum pernah dibuat sama
- *    sekali). Akibatnya UPDATE folder di migrasi sebelumnya tidak
- *    menghasilkan apa-apa untuk jenis-jenis ini, dan mereka tidak muncul
- *    sebagai folder di halaman Arsip meskipun category_id-nya sudah benar.
- *  - Script ini melengkapi itu: untuk setiap document_types yang BELUM
- *    punya folder (category_id + type_id belum ada baris `folders`-nya),
- *    dibuatkan folder baru di bawah folder induk kategorinya.
- *
- * IDEMPOTENT — aman dijalankan berkali-kali. Kalau semua document_types
- * sudah punya folder, script tidak melakukan perubahan apa pun.
- *
- * Cara pakai:
- *   cd backend
- *   node scripts/sync-type-folders.js
- */
-
 require("dotenv").config();
 const pool = require("../config/db");
 
@@ -34,8 +6,6 @@ async function main() {
   try {
     await conn.beginTransaction();
 
-    // Semua document_types yang belum punya folder (category_id + type_id
-    // belum ada baris folders yang cocok).
     const [missingTypes] = await conn.query(`
       SELECT dt.type_id, dt.type_name, dt.category_id, c.category_name
       FROM document_types dt
@@ -53,8 +23,6 @@ async function main() {
 
     console.log(`Ditemukan ${missingTypes.length} jenis dokumen yang belum punya folder:`);
 
-    // Cache folder induk (root, type_id NULL, parent_id NULL) per kategori
-    // supaya tidak query berulang untuk kategori yang sama.
     const rootFolderCache = new Map();
     let createdCount = 0;
 

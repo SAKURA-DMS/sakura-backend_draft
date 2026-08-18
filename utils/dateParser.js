@@ -1,15 +1,7 @@
-// ── Date Parser/Normalizer ───────────────────────────────────────────────────
-// Dipakai untuk menormalisasi tanggal hasil OCR (atau input manual) yang bisa
-// datang dalam berbagai format ("17 Januari 1999", "17/01/1999", dst) menjadi
-// format ISO "YYYY-MM-DD" sebelum disimpan ke database (kolom DATE).
-//
-// PENTING: modul ini TIDAK menyentuh proses OCR itu sendiri (lihat
-// services/geminiService.js) — hasil mentah OCR tetap apa adanya. Modul ini
-// hanya dipakai sesaat sebelum INSERT ke database untuk mem-validasi dan
-// menormalisasi nilai tanggal.
+// This module is used only immediately before inserting into the database to validate and normalize date values.
 
 const MONTH_MAP = {
-  // Indonesia (nama penuh & singkatan umum)
+  // Indonesia (fullname & short forms)
   jan: 1, januari: 1,
   feb: 2, februari: 2,
   mar: 3, maret: 3,
@@ -22,7 +14,7 @@ const MONTH_MAP = {
   okt: 10, oktober: 10,
   nov: 11, november: 11,
   des: 12, desember: 12,
-  // English (nama penuh & singkatan umum)
+  // English (fullname & short forms)
   january: 1,
   february: 2,
   march: 3,
@@ -31,9 +23,7 @@ const MONTH_MAP = {
   august: 8,
   october: 10,
   december: 12,
-  // "may"/"mei" ambigu antara Indonesia & Inggris, tapi sama-sama bulan 5.
   may: 5,
-  // "jun"/"jul" sudah sama antara Indonesia & Inggris di atas.
   aug: 8,
   oct: 10,
   dec: 12,
@@ -57,16 +47,8 @@ function toISO(y, mo, d) {
 }
 
 /**
- * Normalisasi berbagai format tanggal menjadi "YYYY-MM-DD".
- * Mendukung antara lain:
- *   17 Januari 1999 | 17 Jan 1999 | 17-01-1999 | 17/01/1999 |
- *   1999-01-17 | 17.01.1999 | 17 January 1999 | January 17, 1999 |
- *   17 Januari,1999
- *
  * @param {string|null|undefined} raw
  * @returns {{ value: string|null, error: string|null }}
- *   value: tanggal ISO (YYYY-MM-DD) atau null jika input kosong.
- *   error: pesan error yang jelas jika format tidak bisa dikenali, atau null.
  */
 function normalizeDateToISO(raw) {
   if (raw === null || raw === undefined) return { value: null, error: null };
@@ -82,12 +64,11 @@ function normalizeDateToISO(raw) {
       `1999-01-17, 17.01.1999, 17 January 1999, January 17, 1999.`,
   });
 
-  // Bersihkan koma & rapikan spasi supaya "17 Januari,1999" ≈ "17 Januari 1999".
   const cleaned = original.replace(/,/g, " ").replace(/\s+/g, " ").trim();
 
   let match;
 
-  // 1) ISO: YYYY-MM-DD (atau YYYY/M/D dsb — jarang, tapi ditangani juga)
+  // 1) ISO: YYYY-MM-DD (atau YYYY/M/D dsb)
   match = cleaned.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
   if (match) {
     const y = Number(match[1]);

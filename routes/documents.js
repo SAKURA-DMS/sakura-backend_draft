@@ -17,10 +17,10 @@ const { normalizeDateToISO } = require("../utils/dateParser");
 const router = express.Router();
 router.use(authRequired);
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers 
 
-// Format nomor dokumen: [KODE_KATEGORI]-[KODE_JENIS]-[TAHUN]-[RUNNING_NUMBER]
-// Contoh: DS-IJZ-2026-000001
+// Format no. dokumen: [KODE_KATEGORI]-[KODE_JENIS]-[TAHUN]-[RUNNING_NUMBER]
+// Example: DS-IJZ-2026-000001
 // Running number auto-increment per KOMBINASI kategori + jenis (bukan per
 // jenis saja), dan reset ke 1 setiap tahun berganti.
 async function generateDocumentNumber(conn, categoryId, typeId) {
@@ -137,20 +137,8 @@ async function addAudit(
   );
 }
 
-// ── Sensitive doc access helper ───────────────────────────────────────────────
-//
+// Sensitive doc access helper 
 // Operator/TU & Kepala Sekolah tetap memiliki akses penuh.
-//
-// Untuk Guru:
-// - Dokumen non-sensitive mengikuti aturan akses endpoint masing-masing.
-// - Dokumen sensitive hanya dapat dibuka jika:
-//   1. Guru adalah uploader dokumen, ATAU
-//   2. Guru terdaftar sebagai owner pada document_owners.
-//
-// CATATAN:
-// Data Siswa (category_id = 1) memang dapat DILIHAT oleh semua Guru,
-// tetapi jika suatu dokumen Data Siswa secara eksplisit ditandai sensitive,
-// proteksi sensitive tetap berlaku.
 async function assertSensitiveAccess(conn, doc, user) {
   if (!doc.is_sensitive) return;
 
@@ -170,7 +158,7 @@ async function assertSensitiveAccess(conn, doc, user) {
   }
 }
 
-// ── GET /api/documents — list dengan filter ───────────────────────────────────
+// GET /api/documents - list dengan filter 
 router.get("/", async (req, res, next) => {
   try {
     const {
@@ -224,18 +212,7 @@ router.get("/", async (req, res, next) => {
       params.push(`%${q}%`, `%${q}%`);
     }
 
-    // ── AKSES DOKUMEN UNTUK ROLE GURU (halaman Arsip) ────────────────────────
-    //
-    // Halaman Arsip menampilkan SEMUA dokumen untuk semua role, termasuk
-    // Guru — sama seperti role lain yang berhak melihat seluruh arsip.
-    // Tidak ada filter created_by/uploaded_by khusus role Guru di sini.
-    //
-    // Proteksi dokumen SENSITIVE tetap berjalan lewat assertSensitiveAccess()
-    // pada endpoint detail/download/preview, jadi dokumen sensitive tetap
-    // tidak bisa dibuka Guru yang bukan uploader/owner meskipun muncul di
-    // daftar. Filter khusus "hanya milik sendiri" untuk tab Persetujuan
-    // tetap berada terpisah di routes/approvals.js dan tidak diubah di sini.
-
+    // Document Access Filter (Archive Rules) 
     const [rows] = await pool.query(
       `
       SELECT
@@ -262,7 +239,7 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// ── GET /api/documents/next-number — preview nomor dokumen berikutnya ─────────
+// GET /api/documents/next-number - preview no document
 router.get("/meta/next-number", async (req, res, next) => {
   try {
     const { category_id, type_id } = req.query;
@@ -325,7 +302,7 @@ router.get("/meta/next-number", async (req, res, next) => {
   }
 });
 
-// ── GET /api/documents/:id — detail + audit trail + metadata ──────────────────
+// GET /api/documents/:id — detail + audit trail + metadata 
 router.get("/:id", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -353,14 +330,7 @@ router.get("/:id", async (req, res, next) => {
       });
     }
 
-    // ── AKSES DETAIL UNTUK GURU ──────────────────────────────────────────────
-    //
-    // Halaman Arsip menampilkan SEMUA dokumen untuk Guru, sehingga detail
-    // dokumen non-sensitive juga boleh dibuka tanpa syarat uploader/owner.
-    // Proteksi dokumen sensitive tetap berlaku lewat assertSensitiveAccess()
-    // di bawah ini.
-
-    // Proteksi dokumen sensitive tetap berlaku.
+    // ACCESS DETAIL FOR TEACHER
     try {
       await assertSensitiveAccess(
         pool,
@@ -451,7 +421,7 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-// ── GET /api/documents/:id/download — URL Supabase Storage bertoken ───────────
+// GET /api/documents/:id/download - URL Supabase Storage bertoken 
 router.get("/:id/download", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -530,7 +500,7 @@ router.get("/:id/download", async (req, res, next) => {
   }
 });
 
-// ── GET /api/documents/:id/preview ────────────────────────────────────────────
+// GET /api/documents/:id/preview 
 router.get("/:id/preview", async (req, res, next) => {
   try {
     const [[doc]] = await pool.query(
@@ -598,7 +568,7 @@ router.get("/:id/preview", async (req, res, next) => {
   }
 });
 
-// ── POST /api/documents/:id/download-stream ──────────────────────────────────
+// POST /api/documents/:id/download-stream 
 router.post("/:id/download-stream", async (req, res, next) => {
   try {
     const { password } = req.body || {};
@@ -723,7 +693,7 @@ router.post("/:id/download-stream", async (req, res, next) => {
   }
 });
 
-// ── POST /api/documents — upload dokumen baru ─────────────────────────────────
+// POST /api/documents - upload dokumen baru 
 router.post(
   "/",
   requirePermission("documents.upload"),
@@ -1191,7 +1161,7 @@ router.post(
   }
 );
 
-// ── PATCH /api/documents/:id/file — replace file ──────────────────────────────
+// PATCH /api/documents/:id/file - replace file 
 router.patch(
   "/:id/file",
   requirePermission("documents.edit"),
@@ -1344,7 +1314,7 @@ router.patch(
   }
 );
 
-// ── PATCH /api/documents/:id — edit metadata dasar ───────────────────────────
+// PATCH /api/documents/:id - edit basis metadata  
 router.patch(
   "/:id",
   requirePermission("documents.edit"),
