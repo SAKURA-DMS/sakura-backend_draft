@@ -1,13 +1,3 @@
-/**
- * Jalankan script ini SEKALI untuk tahu model apa yang tersedia di API key Anda:
- * 
- *   node checkGeminiModels.js YOUR_API_KEY_HERE
- * 
- * atau jika GEMINI_API_KEY sudah ada di .env:
- * 
- *   node -e "require('dotenv').config(); require('./checkGeminiModels')"
- */
-
 const https = require("https");
 
 const API_KEY = process.argv[2] || process.env.GEMINI_API_KEY;
