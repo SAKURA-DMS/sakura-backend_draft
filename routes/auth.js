@@ -379,7 +379,7 @@ router.get("/me", authRequired, async (req, res, next) => {
       [req.user.id]
     );
     const [rows] = await pool.query(
-      "SELECT id, nama, email, role, departemen, nip, avatar, status, is_2fa_enabled, must_change_password FROM users WHERE id = ?",
+      "SELECT id, nama, email, role, departemen, nip, avatar, status, is_2fa_enabled, must_change_password, notif_email_enabled FROM users WHERE id = ?",
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: "User tidak ditemukan" });
@@ -389,6 +389,7 @@ router.get("/me", authRequired, async (req, res, next) => {
         ...u,
         twoFactorEnabled:   !!u.is_2fa_enabled,
         mustChangePassword: !!u.must_change_password,
+        notifEmailEnabled:  !!u.notif_email_enabled,
       },
     });
   } catch (e) {

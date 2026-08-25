@@ -376,7 +376,361 @@ async function sendOtpEmail({
   );
 }
 
+/**
+ * Template HTML email notifikasi sistem (upload / approval / rejection / dsb).
+ * Mengikuti gaya visual template OTP (buildOtpEmailHtml) agar konsisten.
+ *
+ * @param {string} namaUser
+ * @param {string} message      isi pesan notifikasi (mis. "Dokumen \"X\" telah disetujui dan diarsipkan")
+ * @param {string} eventLabel   label jenis event, mis. "Dokumen Disetujui", "Dokumen Ditolak", "Upload Dokumen", "Menunggu Persetujuan"
+ * @param {string} occurredAtText  waktu kejadian dalam bentuk teks siap tampil (sudah diformat)
+ * @returns {string}
+ */
+function buildNotificationEmailHtml(namaUser, message, eventLabel, occurredAtText) {
+  return `
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAKURA - Notifikasi</title>
+</head>
+
+<body
+  style="
+    margin:0;
+    padding:0;
+    background:#f4f6fa;
+    font-family:Arial, Helvetica, sans-serif;
+    color:#2f2f35;
+  "
+>
+
+  <div
+    style="
+      max-width:640px;
+      margin:32px auto;
+      background:#ffffff;
+      border:1px solid #e7e7ef;
+      border-radius:18px;
+      overflow:hidden;
+      box-shadow:0 8px 28px rgba(18,24,40,.08);
+    "
+  >
+
+    <!-- Sakura Banner -->
+    <div
+      style="
+        background:#f9e7ef;
+        line-height:0;
+      "
+    >
+      <img
+        src="https://sakuradms.com/sakura_branch.png"
+        alt="Sakura"
+        style="
+          display:block;
+          width:100%;
+          height:180px;
+          object-fit:cover;
+          object-position:center top;
+          border:0;
+        "
+      />
+    </div>
+
+    <!-- Logo & Branding -->
+    <div
+      style="
+        background:#ffffff;
+        padding:24px 34px;
+        border-bottom:1px solid #ececf3;
+      "
+    >
+      <table
+        role="presentation"
+        cellpadding="0"
+        cellspacing="0"
+        border="0"
+        style="
+          border-collapse:collapse;
+          margin:0 auto;
+        "
+      >
+        <tr>
+
+          <!-- Logo -->
+          <td
+            style="
+              vertical-align:middle;
+              padding:0 16px 0 0;
+            "
+          >
+            <img
+              src="https://sakuradms.com/logo_sakura.png"
+              alt="Logo SAKURA"
+              width="62"
+              height="62"
+              style="
+                display:block;
+                width:62px;
+                height:62px;
+                object-fit:contain;
+                border:0;
+              "
+            />
+          </td>
+
+          <!-- Brand Text -->
+          <td
+            style="
+              vertical-align:middle;
+              padding:0;
+            "
+          >
+            <div
+              style="
+                margin:0 0 5px 0;
+                font-size:32px;
+                font-weight:700;
+                color:#8c3555;
+                letter-spacing:1.5px;
+                line-height:1.05;
+              "
+            >
+              SAKURA
+            </div>
+
+            <div
+              style="
+                margin:0;
+                max-width:390px;
+                font-size:11px;
+                font-weight:500;
+                color:#77727a;
+                line-height:1.45;
+                letter-spacing:.15px;
+              "
+            >
+              Secure Archiving and Keeping of Unified Records for Administration
+            </div>
+          </td>
+
+        </tr>
+      </table>
+    </div>
+
+    <!-- Email Body -->
+    <div
+      style="
+        padding:34px 38px 30px;
+      "
+    >
+
+      <p
+        style="
+          margin:0 0 12px;
+          font-size:15px;
+          line-height:1.7;
+          color:#2f2f35;
+        "
+      >
+        Halo, <strong>${namaUser}</strong>,
+      </p>
+
+      <p
+        style="
+          margin:0 0 24px;
+          font-size:14px;
+          line-height:1.8;
+          color:#4e4e5a;
+        "
+      >
+        Anda memiliki notifikasi baru dari SAKURA Document Management System.
+      </p>
+
+      <!-- Notification Card -->
+      <div
+        style="
+          max-width:520px;
+          margin:0 auto 24px;
+          border:1px solid #ead7df;
+          background:#fff8fb;
+          border-radius:14px;
+          padding:20px 22px;
+        "
+      >
+
+        <div
+          style="
+            font-size:11px;
+            color:#9a6a7a;
+            text-transform:uppercase;
+            letter-spacing:1.2px;
+            margin-bottom:10px;
+            font-weight:600;
+          "
+        >
+          ${eventLabel}
+        </div>
+
+        <div
+          style="
+            font-size:15px;
+            font-weight:600;
+            color:#2f2f35;
+            line-height:1.6;
+            margin-bottom:10px;
+          "
+        >
+          ${message}
+        </div>
+
+        <div
+          style="
+            font-size:12px;
+            color:#75757f;
+          "
+        >
+          ${occurredAtText}
+        </div>
+
+      </div>
+
+      <p
+        style="
+          margin:0;
+          font-size:14px;
+          line-height:1.8;
+          color:#4e4e5a;
+        "
+      >
+        Buka aplikasi SAKURA untuk melihat detail selengkapnya.
+      </p>
+
+    </div>
+
+    <!-- Footer -->
+    <div
+      style="
+        padding:18px 30px;
+        border-top:1px solid #ececf3;
+        background:#fbfbfd;
+        text-align:center;
+      "
+    >
+
+      <div
+        style="
+          margin:0 0 5px;
+          font-size:12px;
+          font-weight:600;
+          color:#77727f;
+        "
+      >
+        SAKURA Document Management System
+      </div>
+
+      <div
+        style="
+          margin:0;
+          font-size:11px;
+          line-height:1.6;
+          color:#9a9aa5;
+        "
+      >
+        © ${new Date().getFullYear()} SAKURA ·
+        Email ini dibuat otomatis, mohon tidak membalas email ini. Anda menerima email ini karena
+        notifikasi email aktif di Pengaturan akun Anda.
+      </div>
+
+    </div>
+
+  </div>
+
+</body>
+</html>
+  `.trim();
+}
+
+/**
+ * Kirim email notifikasi sistem ke user (upload / approval / rejection / dsb).
+ * Tidak melempar error ke pemanggil jika gagal — hanya dicatat ke console,
+ * supaya kegagalan kirim email tidak menggagalkan proses utama (mis. approve/reject dokumen).
+ *
+ * @param {object} params
+ * @param {string} params.to
+ * @param {string} params.namaUser
+ * @param {string} params.message      isi notifikasi (sama dengan yang tampil di panel in-app)
+ * @param {string} [params.eventLabel="Notifikasi SAKURA"] label jenis event
+ * @param {Date}   [params.occurredAt] waktu kejadian, default: sekarang
+ * @returns {Promise<void>}
+ */
+async function sendNotificationEmail({
+  to,
+  namaUser,
+  message,
+  eventLabel = "Notifikasi SAKURA",
+  occurredAt = new Date(),
+}) {
+  if (!resend) {
+    console.warn(
+      "RESEND_API_KEY belum diset — email notifikasi tidak dikirim ke:",
+      to
+    );
+    return;
+  }
+
+  const occurredAtText = occurredAt.toLocaleString("id-ID", {
+    dateStyle: "long",
+    timeStyle: "short",
+  });
+
+  const subject = `[SAKURA DMS] ${eventLabel}`;
+
+  const html = buildNotificationEmailHtml(
+    namaUser,
+    message,
+    eventLabel,
+    occurredAtText
+  );
+
+  try {
+    const { data, error } = await resend.emails.send({
+      from:
+        process.env.RESEND_FROM ||
+        "SAKURA DMS <onboarding@resend.dev>",
+
+      to,
+
+      subject,
+
+      html,
+
+      text:
+        `Halo, ${namaUser}.\n\n` +
+        `${eventLabel}\n` +
+        `${message}\n` +
+        `Waktu: ${occurredAtText}\n\n` +
+        `Buka aplikasi SAKURA untuk melihat detail selengkapnya.`,
+    });
+
+    if (error) {
+      console.error(
+        "Resend API error (notification email):",
+        error.message || JSON.stringify(error)
+      );
+      return;
+    }
+
+    console.log("RESEND NOTIFICATION EMAIL SENT, id:", data?.id, "to:", to);
+  } catch (err) {
+    console.error("Gagal mengirim email notifikasi ke", to, "-", err.message);
+  }
+}
+
 module.exports = {
   verifySmtp,
   sendOtpEmail,
+  sendNotificationEmail,
 };

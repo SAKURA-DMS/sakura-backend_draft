@@ -13,11 +13,40 @@ const {
 } = require("../services/supabaseStorage");
 const { generateAuditHash } = require("../utils/auditHash");
 const { normalizeDateToISO } = require("../utils/dateParser");
+const { sendNotificationEmail } = require("../services/emailService");
 
 const router = express.Router();
 router.use(authRequired);
 
-// Helpers 
+// Helpers
+
+// Kirim email notifikasi ke user (dari daftar userIds) yang mengaktifkan
+// toggle "Email" di Pengaturan Sistem > Notifikasi. Dipanggil setelah
+// notifikasi in-app dibuat; kegagalan kirim email tidak mempengaruhi
+// proses utama (tidak dilempar sebagai error).
+async function notifyEmailForUsers(conn, userIds, message, eventLabel) {
+  if (!userIds || userIds.length === 0) return;
+  try {
+    const [emailTargets] = await conn.query(
+      `SELECT id, nama, email FROM users
+       WHERE id IN (?) AND notif_email_enabled = 1`,
+      [userIds]
+    );
+    for (const target of emailTargets) {
+      sendNotificationEmail({
+        to: target.email,
+        namaUser: target.nama,
+        message,
+        eventLabel,
+      }).catch((err) => {
+        console.error("Gagal mengirim email notifikasi:", err.message);
+      });
+    }
+  } catch (err) {
+    console.error("Gagal mengambil daftar penerima email notifikasi:", err.message);
+  }
+}
+
 
 // Format no. dokumen: [KODE_KATEGORI]-[KODE_JENIS]-[TAHUN]-[RUNNING_NUMBER]
 // Example: DS-IJZ-2026-000001
@@ -1102,6 +1131,20 @@ router.post(
             req.user.id,
           ]
         );
+
+        const [approverRows] = await conn.query(
+          `SELECT id FROM users
+           WHERE role IN ('Kepala Sekolah', 'Operator/TU')
+             AND status = 'active'
+             AND id != ?`,
+          [req.user.id]
+        );
+        await notifyEmailForUsers(
+          conn,
+          approverRows.map((r) => r.id),
+          `Dokumen baru menunggu persetujuan: ${judul}`,
+          "Menunggu Persetujuan"
+        );
       } else {
         await addAudit(
           conn,
@@ -1539,6 +1582,19 @@ router.post(
         [req.params.id]
       );
 
+      const [[approvedDoc]] = await conn.query(
+        "SELECT uploaded_by, judul FROM documents WHERE id = ?",
+        [req.params.id]
+      );
+      if (approvedDoc) {
+        await notifyEmailForUsers(
+          conn,
+          [approvedDoc.uploaded_by],
+          `Dokumen "${approvedDoc.judul}" telah disetujui dan diarsipkan`,
+          "Dokumen Disetujui"
+        );
+      }
+
       await conn.commit();
 
       res.json({
@@ -1664,6 +1720,19 @@ router.post(
         `,
         [req.params.id]
       );
+
+      const [[rejectedDoc]] = await conn.query(
+        "SELECT uploaded_by, judul FROM documents WHERE id = ?",
+        [req.params.id]
+      );
+      if (rejectedDoc) {
+        await notifyEmailForUsers(
+          conn,
+          [rejectedDoc.uploaded_by],
+          `Dokumen "${rejectedDoc.judul}" ditolak. Alasan: ${reason}`,
+          "Dokumen Ditolak"
+        );
+      }
 
       await conn.commit();
 

@@ -171,6 +171,24 @@ router.patch("/:id/avatar", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// PATCH /api/users/:id/notification-email — update preferensi toggle notifikasi email (hanya diri sendiri)
+router.patch("/:id/notification-email", async (req, res, next) => {
+  try {
+    if (Number(req.params.id) !== req.user.id) {
+      return res.status(403).json({ error: "Hanya bisa mengubah preferensi milik sendiri" });
+    }
+    const { enabled } = req.body;
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled wajib berupa boolean" });
+    }
+    await pool.query(
+      "UPDATE users SET notif_email_enabled = ? WHERE id = ?",
+      [enabled ? 1 : 0, req.user.id]
+    );
+    res.json({ message: "Preferensi notifikasi email diperbarui", notifEmailEnabled: enabled });
+  } catch (e) { next(e); }
+});
+
 // PATCH /api/users/:id - update profil 
 router.patch("/:id", async (req, res, next) => {
   try {
