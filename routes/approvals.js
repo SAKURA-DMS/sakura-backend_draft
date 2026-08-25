@@ -1,736 +1,605 @@
-const { Resend } = require("resend");
+const express = require("express");
+const pool    = require("../config/db");
+const { authRequired }      = require("../middleware/auth");
+const { requirePermission } = require("../middleware/rbac");
+const { generateAuditHash } = require("../utils/auditHash");
+const { sendNotificationEmail } = require("../services/emailService");
 
-const resend = process.env.RESEND_API_KEY
-  ? new Resend(process.env.RESEND_API_KEY)
-  : null;
+const router = express.Router();
+router.use(authRequired);
 
-async function verifySmtp() {
-  if (!process.env.RESEND_API_KEY) {
-    console.warn(
-      "RESEND_API_KEY belum diset — pengiriman OTP email akan gagal"
+function allowApprovalsView(req, res, next) {
+  if (req.user?.role === "Guru") return next();
+  return requirePermission("approvals.view")(req, res, next);
+}
+
+async function addAudit(
+  conn,
+  docId,
+  userId,
+  action,
+  approvalRequestId = null,
+  oldValue = null,
+  newValue = null
+) {
+
+  const [[lastAudit]] = await conn.query(`
+    SELECT current_hash
+    FROM audit_trail
+    ORDER BY id DESC
+    LIMIT 1
+  `);
+
+  const previousHash =
+    lastAudit?.current_hash || "";
+
+  const auditData = {
+    document_id: docId,
+    approval_request_id: approvalRequestId,
+    user_id: userId,
+    action,
+    old_value: oldValue,
+    new_value: newValue,
+    created_at: new Date()
+  };
+
+  const currentHash =
+    generateAuditHash(
+      auditData,
+      previousHash
     );
-    return;
-  }
 
-  console.log("Resend email API configured");
+  await conn.query(`
+    INSERT INTO audit_trail
+    (
+      document_id,
+      approval_request_id,
+      user_id,
+      action,
+      previous_hash,
+      current_hash,
+      old_value,
+      new_value
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    docId,
+    approvalRequestId || null,
+    userId,
+    action,
+    previousHash,
+    currentHash,
+    oldValue ? JSON.stringify(oldValue) : null,
+    newValue ? JSON.stringify(newValue) : null
+  ]);
 }
 
-/**
- * Template HTML email OTP.
- *
- * @param {string} namaUser  
- * @param {string} otpCode  
- * @param {number} expiryMin 
- * @returns {string} 
- */
-function buildOtpEmailHtml(namaUser, otpCode, expiryMin = 5) {
-  return `
-<!DOCTYPE html>
-<html lang="id">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SAKURA - Kode OTP Verifikasi</title>
-</head>
-
-<body
-  style="
-    margin:0;
-    padding:0;
-    background:#f4f6fa;
-    font-family:Arial, Helvetica, sans-serif;
-    color:#2f2f35;
-  "
->
-
-  <div
-    style="
-      max-width:640px;
-      margin:32px auto;
-      background:#ffffff;
-      border:1px solid #e7e7ef;
-      border-radius:18px;
-      overflow:hidden;
-      box-shadow:0 8px 28px rgba(18,24,40,.08);
-    "
-  >
-
-    <!-- Sakura Banner -->
-    <div
-      style="
-        background:#f9e7ef;
-        line-height:0;
-      "
-    >
-      <img
-        src="https://sakuradms.com/sakura_branch.png"
-        alt="Sakura"
-        style="
-          display:block;
-          width:100%;
-          height:180px;
-          object-fit:cover;
-          object-position:center top;
-          border:0;
-        "
-      />
-    </div>
-
-    <!-- Logo & Branding -->
-    <div
-      style="
-        background:#ffffff;
-        padding:24px 34px;
-        border-bottom:1px solid #ececf3;
-      "
-    >
-      <table
-        role="presentation"
-        cellpadding="0"
-        cellspacing="0"
-        border="0"
-        style="
-          border-collapse:collapse;
-          margin:0 auto;
-        "
-      >
-        <tr>
-
-          <!-- Logo -->
-          <td
-            style="
-              vertical-align:middle;
-              padding:0 16px 0 0;
-            "
-          >
-            <img
-              src="https://sakuradms.com/logo_sakura.png"
-              alt="Logo SAKURA"
-              width="62"
-              height="62"
-              style="
-                display:block;
-                width:62px;
-                height:62px;
-                object-fit:contain;
-                border:0;
-              "
-            />
-          </td>
-
-          <!-- Brand Text -->
-          <td
-            style="
-              vertical-align:middle;
-              padding:0;
-            "
-          >
-            <div
-              style="
-                margin:0 0 5px 0;
-                font-size:32px;
-                font-weight:700;
-                color:#8c3555;
-                letter-spacing:1.5px;
-                line-height:1.05;
-              "
-            >
-              SAKURA
-            </div>
-
-            <div
-              style="
-                margin:0;
-                max-width:390px;
-                font-size:11px;
-                font-weight:500;
-                color:#77727a;
-                line-height:1.45;
-                letter-spacing:.15px;
-              "
-            >
-              Secure Archiving and Keeping of Unified Records for Administration
-            </div>
-          </td>
-
-        </tr>
-      </table>
-    </div>
-
-    <!-- Email Body -->
-    <div
-      style="
-        padding:34px 38px 30px;
-      "
-    >
-
-      <p
-        style="
-          margin:0 0 12px;
-          font-size:15px;
-          line-height:1.7;
-          color:#2f2f35;
-        "
-      >
-        Halo, <strong>${namaUser}</strong>,
-      </p>
-
-      <p
-        style="
-          margin:0 0 24px;
-          font-size:14px;
-          line-height:1.8;
-          color:#4e4e5a;
-        "
-      >
-        Kode berikut digunakan untuk verifikasi akun SAKURA saat login
-        atau aktivasi keamanan dua langkah.
-      </p>
-
-      <!-- OTP Card -->
-      <div
-        style="
-          max-width:360px;
-          margin:0 auto 24px;
-          border:1px solid #ead7df;
-          background:#fff8fb;
-          border-radius:14px;
-          text-align:center;
-          padding:22px 18px;
-        "
-      >
-
-        <div
-          style="
-            font-size:11px;
-            color:#9a6a7a;
-            text-transform:uppercase;
-            letter-spacing:1.2px;
-            margin-bottom:12px;
-            font-weight:600;
-          "
-        >
-          Kode OTP
-        </div>
-
-        <div
-          style="
-            font-size:38px;
-            font-weight:800;
-            letter-spacing:10px;
-            color:#8c3555;
-            font-family:'Courier New', monospace;
-            margin:0 0 8px;
-            padding-left:10px;
-          "
-        >
-          ${otpCode}
-        </div>
-
-        <div
-          style="
-            font-size:12px;
-            color:#75757f;
-          "
-        >
-          Berlaku selama <strong>${expiryMin} menit</strong>
-        </div>
-
-      </div>
-
-      <!-- Security Warning -->
-      <div
-        style="
-          background:#fff8e8;
-          border-left:4px solid #e1b23c;
-          border-radius:8px;
-          padding:14px 16px;
-          font-size:13px;
-          line-height:1.7;
-          color:#6a5a22;
-          margin-bottom:22px;
-        "
-      >
-        <strong>Jangan bagikan kode ini kepada siapa pun.</strong>
-        Tim SAKURA tidak pernah meminta kode OTP Anda.
-        Jika Anda tidak merasa meminta kode ini, abaikan email ini.
-      </div>
-
-      <p
-        style="
-          margin:0;
-          font-size:14px;
-          line-height:1.8;
-          color:#4e4e5a;
-        "
-      >
-        Masukkan kode di atas pada halaman verifikasi yang sedang terbuka.
-        Kode hanya dapat digunakan satu kali.
-      </p>
-
-    </div>
-
-    <!-- Footer -->
-    <div
-      style="
-        padding:18px 30px;
-        border-top:1px solid #ececf3;
-        background:#fbfbfd;
-        text-align:center;
-      "
-    >
-
-      <div
-        style="
-          margin:0 0 5px;
-          font-size:12px;
-          font-weight:600;
-          color:#77727f;
-        "
-      >
-        SAKURA Document Management System
-      </div>
-
-      <div
-        style="
-          margin:0;
-          font-size:11px;
-          line-height:1.6;
-          color:#9a9aa5;
-        "
-      >
-        © ${new Date().getFullYear()} SAKURA ·
-        Email ini dibuat otomatis, mohon tidak membalas email ini.
-      </div>
-
-    </div>
-
-  </div>
-
-</body>
-</html>
-  `.trim();
-}
-
-/**
- * Kirim email OTP ke user.
- *
- * @param {object} params
- * @param {string} params.to
- * @param {string} params.namaUser
- * @param {string} params.otpCode
- * @param {number} [params.expiryMin=5]
- * @returns {Promise<void>}
- */
-async function sendOtpEmail({
-  to,
-  namaUser,
-  otpCode,
-  expiryMin = 5,
-}) {
-  const subject = `[SAKURA DMS] Kode OTP Verifikasi`;
-
-  const html = buildOtpEmailHtml(
-    namaUser,
-    otpCode,
-    expiryMin
+async function sendNotif(conn, userIds, message, type, docId, eventLabel = "Notifikasi SAKURA") {
+  if (!userIds || userIds.length === 0) return;
+  const rows = userIds.map((uid) => [uid, message, type, docId]);
+  await conn.query(
+    "INSERT INTO notifications (user_id, message, type, document_id) VALUES ?",
+    [rows]
   );
 
-  console.log("SEND OTP TO:", to);
-
-  if (!resend) {
-    throw new Error(
-      "RESEND_API_KEY belum diset di environment variables"
-    );
-  }
-
-  const { data, error } = await resend.emails.send({
-    from:
-      process.env.RESEND_FROM ||
-      "SAKURA DMS <onboarding@resend.dev>",
-
-    to,
-
-    subject,
-
-    html,
-
-    text:
-      `Halo, ${namaUser}.\n\n` +
-      `Kode OTP verifikasi SAKURA Anda: ${otpCode}\n` +
-      `Kode berlaku selama ${expiryMin} menit dan hanya dapat digunakan satu kali.\n\n` +
-      `Jangan bagikan kode ini kepada siapa pun.`,
-  });
-
-  if (error) {
-    throw new Error(
-      `Resend API error: ${
-        error.message || JSON.stringify(error)
-      }`
-    );
-  }
-
-  console.log(
-    "RESEND OTP SENT, id:",
-    data?.id
-  );
-}
-
-/**
- * Template HTML email notifikasi sistem (upload / approval / rejection / dsb).
- * Mengikuti gaya visual template OTP (buildOtpEmailHtml) agar konsisten.
- *
- * @param {string} namaUser
- * @param {string} message      isi pesan notifikasi (mis. "Dokumen \"X\" telah disetujui dan diarsipkan")
- * @param {string} eventLabel   label jenis event, mis. "Dokumen Disetujui", "Dokumen Ditolak", "Upload Dokumen", "Menunggu Persetujuan"
- * @param {string} occurredAtText  waktu kejadian dalam bentuk teks siap tampil (sudah diformat)
- * @returns {string}
- */
-function buildNotificationEmailHtml(namaUser, message, eventLabel, occurredAtText) {
-  return `
-<!DOCTYPE html>
-<html lang="id">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SAKURA - Notifikasi</title>
-</head>
-
-<body
-  style="
-    margin:0;
-    padding:0;
-    background:#f4f6fa;
-    font-family:Arial, Helvetica, sans-serif;
-    color:#2f2f35;
-  "
->
-
-  <div
-    style="
-      max-width:640px;
-      margin:32px auto;
-      background:#ffffff;
-      border:1px solid #e7e7ef;
-      border-radius:18px;
-      overflow:hidden;
-      box-shadow:0 8px 28px rgba(18,24,40,.08);
-    "
-  >
-
-    <!-- Sakura Banner -->
-    <div
-      style="
-        background:#f9e7ef;
-        line-height:0;
-      "
-    >
-      <img
-        src="https://sakuradms.com/sakura_branch.png"
-        alt="Sakura"
-        style="
-          display:block;
-          width:100%;
-          height:180px;
-          object-fit:cover;
-          object-position:center top;
-          border:0;
-        "
-      />
-    </div>
-
-    <!-- Logo & Branding -->
-    <div
-      style="
-        background:#ffffff;
-        padding:24px 34px;
-        border-bottom:1px solid #ececf3;
-      "
-    >
-      <table
-        role="presentation"
-        cellpadding="0"
-        cellspacing="0"
-        border="0"
-        style="
-          border-collapse:collapse;
-          margin:0 auto;
-        "
-      >
-        <tr>
-
-          <!-- Logo -->
-          <td
-            style="
-              vertical-align:middle;
-              padding:0 16px 0 0;
-            "
-          >
-            <img
-              src="https://sakuradms.com/logo_sakura.png"
-              alt="Logo SAKURA"
-              width="62"
-              height="62"
-              style="
-                display:block;
-                width:62px;
-                height:62px;
-                object-fit:contain;
-                border:0;
-              "
-            />
-          </td>
-
-          <!-- Brand Text -->
-          <td
-            style="
-              vertical-align:middle;
-              padding:0;
-            "
-          >
-            <div
-              style="
-                margin:0 0 5px 0;
-                font-size:32px;
-                font-weight:700;
-                color:#8c3555;
-                letter-spacing:1.5px;
-                line-height:1.05;
-              "
-            >
-              SAKURA
-            </div>
-
-            <div
-              style="
-                margin:0;
-                max-width:390px;
-                font-size:11px;
-                font-weight:500;
-                color:#77727a;
-                line-height:1.45;
-                letter-spacing:.15px;
-              "
-            >
-              Secure Archiving and Keeping of Unified Records for Administration
-            </div>
-          </td>
-
-        </tr>
-      </table>
-    </div>
-
-    <!-- Email Body -->
-    <div
-      style="
-        padding:34px 38px 30px;
-      "
-    >
-
-      <p
-        style="
-          margin:0 0 12px;
-          font-size:15px;
-          line-height:1.7;
-          color:#2f2f35;
-        "
-      >
-        Halo, <strong>${namaUser}</strong>,
-      </p>
-
-      <p
-        style="
-          margin:0 0 24px;
-          font-size:14px;
-          line-height:1.8;
-          color:#4e4e5a;
-        "
-      >
-        Anda memiliki notifikasi baru dari SAKURA Document Management System.
-      </p>
-
-      <!-- Notification Card -->
-      <div
-        style="
-          max-width:520px;
-          margin:0 auto 24px;
-          border:1px solid #ead7df;
-          background:#fff8fb;
-          border-radius:14px;
-          padding:20px 22px;
-        "
-      >
-
-        <div
-          style="
-            font-size:11px;
-            color:#9a6a7a;
-            text-transform:uppercase;
-            letter-spacing:1.2px;
-            margin-bottom:10px;
-            font-weight:600;
-          "
-        >
-          ${eventLabel}
-        </div>
-
-        <div
-          style="
-            font-size:15px;
-            font-weight:600;
-            color:#2f2f35;
-            line-height:1.6;
-            margin-bottom:10px;
-          "
-        >
-          ${message}
-        </div>
-
-        <div
-          style="
-            font-size:12px;
-            color:#75757f;
-          "
-        >
-          ${occurredAtText}
-        </div>
-
-      </div>
-
-      <p
-        style="
-          margin:0;
-          font-size:14px;
-          line-height:1.8;
-          color:#4e4e5a;
-        "
-      >
-        Buka aplikasi SAKURA untuk melihat detail selengkapnya.
-      </p>
-
-    </div>
-
-    <!-- Footer -->
-    <div
-      style="
-        padding:18px 30px;
-        border-top:1px solid #ececf3;
-        background:#fbfbfd;
-        text-align:center;
-      "
-    >
-
-      <div
-        style="
-          margin:0 0 5px;
-          font-size:12px;
-          font-weight:600;
-          color:#77727f;
-        "
-      >
-        SAKURA Document Management System
-      </div>
-
-      <div
-        style="
-          margin:0;
-          font-size:11px;
-          line-height:1.6;
-          color:#9a9aa5;
-        "
-      >
-        © ${new Date().getFullYear()} SAKURA ·
-        Email ini dibuat otomatis, mohon tidak membalas email ini. Anda menerima email ini karena
-        notifikasi email aktif di Pengaturan akun Anda.
-      </div>
-
-    </div>
-
-  </div>
-
-</body>
-</html>
-  `.trim();
-}
-
-/**
- * Kirim email notifikasi sistem ke user (upload / approval / rejection / dsb).
- * Tidak melempar error ke pemanggil jika gagal — hanya dicatat ke console,
- * supaya kegagalan kirim email tidak menggagalkan proses utama (mis. approve/reject dokumen).
- *
- * @param {object} params
- * @param {string} params.to
- * @param {string} params.namaUser
- * @param {string} params.message      isi notifikasi (sama dengan yang tampil di panel in-app)
- * @param {string} [params.eventLabel="Notifikasi SAKURA"] label jenis event
- * @param {Date}   [params.occurredAt] waktu kejadian, default: sekarang
- * @returns {Promise<void>}
- */
-async function sendNotificationEmail({
-  to,
-  namaUser,
-  message,
-  eventLabel = "Notifikasi SAKURA",
-  occurredAt = new Date(),
-}) {
-  if (!resend) {
-    console.warn(
-      "RESEND_API_KEY belum diset — email notifikasi tidak dikirim ke:",
-      to
-    );
-    return;
-  }
-
-  const occurredAtText = occurredAt.toLocaleString("id-ID", {
-    dateStyle: "long",
-    timeStyle: "short",
-  });
-
-  const subject = `[SAKURA DMS] ${eventLabel}`;
-
-  const html = buildNotificationEmailHtml(
-    namaUser,
-    message,
-    eventLabel,
-    occurredAtText
-  );
-
+  // Kirim email notifikasi juga ke user yang mengaktifkan toggle "Email"
+  // di Pengaturan Sistem > Notifikasi. Kegagalan kirim email tidak
+  // mempengaruhi proses utama (tidak dilempar/tidak menggagalkan transaksi).
   try {
-    const { data, error } = await resend.emails.send({
-      from:
-        process.env.RESEND_FROM ||
-        "SAKURA DMS <onboarding@resend.dev>",
+    const [emailTargets] = await conn.query(
+      `SELECT id, nama, email FROM users
+       WHERE id IN (?) AND notif_email_enabled = 1`,
+      [userIds]
+    );
+    for (const target of emailTargets) {
+      sendNotificationEmail({
+        to: target.email,
+        namaUser: target.nama,
+        message,
+        eventLabel,
+      }).catch((err) => {
+        console.error("Gagal mengirim email notifikasi:", err.message);
+      });
+    }
+  } catch (err) {
+    console.error("Gagal mengambil daftar penerima email notifikasi:", err.message);
+  }
+}
 
-      to,
+async function getApprovers(conn, excludeUserId) {
+  const [rows] = await conn.query(
+    `SELECT id FROM users
+     WHERE role IN ('Kepala Sekolah','Operator/TU')
+       AND status = 'active'
+       AND id != ?`,
+    [excludeUserId]
+  );
+  return rows.map((r) => r.id);
+}
 
-      subject,
+async function reconcileOrphanPendingRequests(conn, documentId = null) {
+  const where = documentId
+    ? "ar.status = 'pending' AND ar.document_id = ? AND d.status != 'Menunggu'"
+    : "ar.status = 'pending' AND d.status != 'Menunggu'";
+  const params = documentId ? [documentId] : [];
 
-      html,
+  const [orphans] = await conn.query(
+    `SELECT ar.id, ar.document_id, d.status AS doc_status
+     FROM approval_requests ar
+     JOIN documents d ON d.id = ar.document_id
+     WHERE ${where}`,
+    params
+  );
 
-      text:
-        `Halo, ${namaUser}.\n\n` +
-        `${eventLabel}\n` +
-        `${message}\n` +
-        `Waktu: ${occurredAtText}\n\n` +
-        `Buka aplikasi SAKURA untuk melihat detail selengkapnya.`,
-    });
+  for (const o of orphans) {
+    const resolvedStatus = o.doc_status === "Ditolak" ? "rejected" : "approved";
+    await conn.query(
+      `UPDATE approval_requests
+         SET status = ?, decided_at = COALESCE(decided_at, NOW())
+       WHERE id = ?`,
+      [resolvedStatus, o.id]
+    );
+    await addAudit(
+      conn,
+      o.document_id,
+      null,
+      "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
+      o.id,
+      { status: "Menunggu" },
+      { status: o.doc_status }
+    );
+  }
+  return orphans;
+}
 
-    if (error) {
-      console.error(
-        "Resend API error (notification email):",
-        error.message || JSON.stringify(error)
-      );
-      return;
+router.get("/", allowApprovalsView, async (req, res, next) => {
+  try {
+    const { status, document_id, requester_id, limit = 100, offset = 0 } = req.query;
+
+    const cleanupConn = await pool.getConnection();
+    try {
+      await cleanupConn.beginTransaction();
+      await reconcileOrphanPendingRequests(cleanupConn, document_id || null);
+      await cleanupConn.commit();
+    } catch (cleanupErr) {
+      await cleanupConn.rollback();
+      console.error("[approvals] Gagal reconcile orphan pending requests:", cleanupErr.message);
+    } finally {
+      cleanupConn.release();
     }
 
-    console.log("RESEND NOTIFICATION EMAIL SENT, id:", data?.id, "to:", to);
-  } catch (err) {
-    console.error("Gagal mengirim email notifikasi ke", to, "-", err.message);
-  }
-}
+    const where  = [];
+    const params = [];
 
-module.exports = {
-  verifySmtp,
-  sendOtpEmail,
-  sendNotificationEmail,
-};
+    if (status)       { where.push("ar.status = ?");       params.push(status); }
+    if (document_id)  { where.push("ar.document_id = ?");  params.push(document_id); }
+    if (requester_id) { where.push("ar.requester_id = ?"); params.push(requester_id); }
+
+    if (req.user.role === "Guru") {
+      where.push("ar.requester_id = ?");
+      params.push(req.user.id);
+    }
+
+    const whereClause = where.length ? "WHERE " + where.join(" AND ") : "";
+
+    const [rows] = await pool.query(
+      `SELECT
+         ar.id, ar.document_id, ar.status,
+         ar.requester_note, ar.approver_note,
+         ar.requested_at, ar.decided_at,
+         -- requester
+         req.id    AS requester_id,
+         req.nama  AS requester_nama,
+         req.role  AS requester_role,
+         req.avatar AS requester_avatar,
+         -- approver
+         apr.id    AS approver_id,
+         apr.nama  AS approver_nama,
+         apr.role  AS approver_role,
+         -- dokumen
+         d.judul, d.nomor_dokumen, d.status AS doc_status,
+         d.category_id, d.type_id, d.versi, d.is_urgent,
+         c.category_name,
+         dt.type_name
+       FROM approval_requests ar
+       JOIN users      req ON req.id = ar.requester_id
+       LEFT JOIN users apr ON apr.id = ar.approver_id
+       JOIN documents  d   ON d.id  = ar.document_id
+       LEFT JOIN categories c    ON c.category_id  = d.category_id
+       LEFT JOIN document_types dt ON dt.type_id   = d.type_id
+       ${whereClause}
+       ORDER BY
+         d.is_urgent DESC,
+         (TIMESTAMPDIFF(HOUR, ar.requested_at, NOW()) >= 72) DESC,
+         CASE WHEN TIMESTAMPDIFF(HOUR, ar.requested_at, NOW()) >= 72 THEN ar.requested_at END ASC,
+         CASE WHEN TIMESTAMPDIFF(HOUR, ar.requested_at, NOW()) < 72  THEN ar.requested_at END DESC
+       LIMIT ? OFFSET ?`,
+      [...params, Number(limit), Number(offset)]
+    );
+
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM approval_requests ar
+       ${whereClause}`,
+      params
+    );
+
+    res.json({ requests: rows, total });
+  } catch (e) { next(e); }
+});
+
+router.get("/:id", allowApprovalsView, async (req, res, next) => {
+  try {
+    const [[ar]] = await pool.query(
+      `SELECT
+         ar.*,
+         req.nama  AS requester_nama,
+         req.role  AS requester_role,
+         req.avatar AS requester_avatar,
+         apr.nama  AS approver_nama,
+         apr.role  AS approver_role,
+         d.judul, d.nomor_dokumen, d.status AS doc_status,
+         d.category_id, d.file_url, d.versi,
+         c.category_name,
+         dt.type_name
+       FROM approval_requests ar
+       JOIN users      req ON req.id = ar.requester_id
+       LEFT JOIN users apr ON apr.id = ar.approver_id
+       JOIN documents  d   ON d.id  = ar.document_id
+       LEFT JOIN categories c    ON c.category_id  = d.category_id
+       LEFT JOIN document_types dt ON dt.type_id   = d.type_id
+       WHERE ar.id = ?`,
+      [req.params.id]
+    );
+    if (!ar) return res.status(404).json({ error: "Approval request tidak ditemukan" });
+
+    if (req.user.role === "Guru" && ar.requester_id !== req.user.id) {
+      return res.status(403).json({ error: "Akses ditolak" });
+    }
+
+    const [trail] = await pool.query(
+      `SELECT a.*, u.nama, u.role, u.avatar
+       FROM audit_trail a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.approval_request_id = ?
+       ORDER BY a.created_at ASC`,
+      [req.params.id]
+    );
+
+    res.json({ request: ar, auditTrail: trail });
+  } catch (e) { next(e); }
+});
+
+router.get("/:id/audit", allowApprovalsView, async (req, res, next) => {
+  try {
+    if (req.user.role === "Guru") {
+      const [[ar]] = await pool.query(
+        "SELECT requester_id FROM approval_requests WHERE id = ?",
+        [req.params.id]
+      );
+      if (!ar) return res.status(404).json({ error: "Approval request tidak ditemukan" });
+      if (ar.requester_id !== req.user.id) {
+        return res.status(403).json({ error: "Akses ditolak" });
+      }
+    }
+
+    const [rows] = await pool.query(
+      `SELECT a.*, u.nama, u.role, u.avatar
+       FROM audit_trail a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.approval_request_id = ?
+       ORDER BY a.created_at ASC`,
+      [req.params.id]
+    );
+    res.json({ logs: rows });
+  } catch (e) { next(e); }
+});
+
+router.post("/", requirePermission("approvals.manage"), async (req, res, next) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const { document_id, requester_note = "" } = req.body;
+    if (!document_id) {
+      await conn.rollback();
+      return res.status(400).json({ error: "document_id wajib diisi" });
+    }
+
+    const [[doc]] = await conn.query(
+      "SELECT id, judul, status, uploaded_by, deleted_at FROM documents WHERE id = ?",
+      [document_id]
+    );
+    if (!doc)           { await conn.rollback(); return res.status(404).json({ error: "Dokumen tidak ditemukan" }); }
+    if (doc.deleted_at) { await conn.rollback(); return res.status(410).json({ error: "Dokumen sudah dihapus" }); }
+    if (doc.status === "Diarsipkan") {
+      await conn.rollback();
+      return res.status(409).json({ error: "Dokumen sudah diarsipkan, tidak perlu approval lagi" });
+    }
+
+    if (req.user.role === "Guru" && doc.uploaded_by !== req.user.id) {
+      await conn.rollback();
+      return res.status(403).json({ error: "Anda hanya bisa mengajukan persetujuan untuk dokumen milik Anda" });
+    }
+
+    const [[existing]] = await conn.query(
+      "SELECT id FROM approval_requests WHERE document_id = ? AND status = 'pending' LIMIT 1",
+      [document_id]
+    );
+    if (existing) {
+      await conn.rollback();
+      return res.status(409).json({
+        error: "Dokumen sudah memiliki approval request yang sedang menunggu",
+        existing_request_id: existing.id,
+      });
+    }
+
+    const [ins] = await conn.query(
+      `INSERT INTO approval_requests (document_id, requester_id, status, requester_note, requested_at)
+       VALUES (?, ?, 'pending', ?, NOW())`,
+      [document_id, req.user.id, requester_note || null]
+    );
+    const requestId = ins.insertId;
+
+    await conn.query(
+      "UPDATE documents SET status = 'Menunggu', updated_at = NOW() WHERE id = ?",
+      [document_id]
+    );
+
+    const auditMsg = requester_note
+      ? `Mengajukan persetujuan: "${requester_note}"`
+      : "Mengajukan persetujuan dokumen";
+    await addAudit(conn, document_id, req.user.id, auditMsg, requestId, { status: "Menunggu" });
+
+    const approverIds = await getApprovers(conn, req.user.id);
+    await sendNotif(
+      conn, approverIds,
+      `Dokumen baru menunggu persetujuan: "${doc.judul}"`,
+      "approval", document_id,
+      "Menunggu Persetujuan"
+    );
+
+    await conn.commit();
+    res.status(201).json({
+      message:    "Approval request berhasil dibuat",
+      request_id: requestId,
+      document_id,
+    });
+  } catch (e) {
+    await conn.rollback();
+    next(e);
+  } finally {
+    conn.release();
+  }
+});
+
+router.post("/:id/approve", requirePermission("documents.approve"), async (req, res, next) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const { comment = "" } = req.body || {};
+
+    const [[ar]] = await conn.query(
+      "SELECT * FROM approval_requests WHERE id = ? FOR UPDATE",
+      [req.params.id]
+    );
+    if (!ar)                   { await conn.rollback(); return res.status(404).json({ error: "Approval request tidak ditemukan" }); }
+    if (ar.status !== "pending") {
+      await conn.rollback();
+      return res.status(409).json({ error: `Request sudah berstatus '${ar.status}', tidak dapat disetujui` });
+    }
+
+    const [[doc]] = await conn.query(
+      "SELECT id, judul, status, uploaded_by FROM documents WHERE id = ? FOR UPDATE",
+      [ar.document_id]
+    );
+    if (!doc) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Dokumen terkait tidak ditemukan" });
+    }
+    if (doc.status !== "Menunggu") {
+      const resolvedStatus = doc.status === "Ditolak" ? "rejected" : "approved";
+      await conn.query(
+        `UPDATE approval_requests
+           SET status = ?, decided_at = COALESCE(decided_at, NOW())
+         WHERE id = ?`,
+        [resolvedStatus, ar.id]
+      );
+      await addAudit(
+        conn, ar.document_id, req.user.id,
+        "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
+        ar.id,
+        { status: "Menunggu" },
+        { status: doc.status }
+      );
+      await conn.commit();
+      return res.status(409).json({
+        error: `Dokumen ini sudah berstatus '${doc.status}' (diputuskan sebelumnya), permintaan persetujuan ini sudah disinkronkan otomatis dan tidak perlu ditindaklanjuti lagi.`,
+        already_resolved: true,
+        document_status: doc.status,
+      });
+    }
+
+    await conn.query(
+      `UPDATE approval_requests
+         SET status = 'approved', approver_id = ?, approver_note = ?, decided_at = NOW()
+       WHERE id = ?`,
+      [req.user.id, comment || null, ar.id]
+    );
+
+    await conn.query(
+      `UPDATE documents
+         SET status = 'Diarsipkan', approval_status = 'approved', approved_by = ?, approved_at = NOW(), updated_at = NOW()
+       WHERE id = ?`,
+      [req.user.id, ar.document_id]
+    );
+
+    await conn.query(
+      `UPDATE approval_requests
+         SET status = 'approved', approver_id = ?, decided_at = NOW()
+       WHERE document_id = ? AND status = 'pending' AND id != ?`,
+      [req.user.id, ar.document_id, ar.id]
+    );
+
+    const approveMsg = comment
+      ? `Menyetujui dokumen: "${comment}"`
+      : "Menyetujui dokumen";
+    await addAudit(conn, ar.document_id, req.user.id, approveMsg, ar.id, { status: "Menunggu" }, { status: "Disetujui" });
+    await addAudit(conn, ar.document_id, req.user.id, "Dokumen otomatis diarsipkan setelah persetujuan", ar.id, { status: "Disetujui" }, { status: "Diarsipkan" });
+
+    await sendNotif(
+      conn, [doc.uploaded_by],
+      `Dokumen "${doc.judul}" telah disetujui dan diarsipkan`,
+      "approval", ar.document_id,
+      "Dokumen Disetujui"
+    );
+
+    await conn.commit();
+    res.json({ message: "Dokumen disetujui dan diarsipkan", request_id: ar.id });
+  } catch (e) {
+    await conn.rollback();
+    next(e);
+  } finally {
+    conn.release();
+  }
+});
+
+router.post("/:id/reject", requirePermission("documents.reject"), async (req, res, next) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const { reason } = req.body;
+    if (!reason || !reason.trim()) {
+      await conn.rollback();
+      return res.status(400).json({ error: "reason wajib diisi" });
+    }
+
+    const [[ar]] = await conn.query(
+      "SELECT * FROM approval_requests WHERE id = ? FOR UPDATE",
+      [req.params.id]
+    );
+    if (!ar)                   { await conn.rollback(); return res.status(404).json({ error: "Approval request tidak ditemukan" }); }
+    if (ar.status !== "pending") {
+      await conn.rollback();
+      return res.status(409).json({ error: `Request sudah berstatus '${ar.status}', tidak dapat ditolak` });
+    }
+
+    const [[doc]] = await conn.query(
+      "SELECT id, judul, status, uploaded_by FROM documents WHERE id = ? FOR UPDATE",
+      [ar.document_id]
+    );
+    if (!doc) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Dokumen terkait tidak ditemukan" });
+    }
+    if (doc.status !== "Menunggu") {
+      const resolvedStatus = doc.status === "Ditolak" ? "rejected" : "approved";
+      await conn.query(
+        `UPDATE approval_requests
+           SET status = ?, decided_at = COALESCE(decided_at, NOW())
+         WHERE id = ?`,
+        [resolvedStatus, ar.id]
+      );
+      await addAudit(
+        conn, ar.document_id, req.user.id,
+        "Status permintaan disinkronkan otomatis dengan status dokumen terkini",
+        ar.id,
+        { status: "Menunggu" },
+        { status: doc.status }
+      );
+      await conn.commit();
+      return res.status(409).json({
+        error: `Dokumen ini sudah berstatus '${doc.status}' (diputuskan sebelumnya), permintaan persetujuan ini sudah disinkronkan otomatis dan tidak perlu ditindaklanjuti lagi.`,
+        already_resolved: true,
+        document_status: doc.status,
+      });
+    }
+
+    await conn.query(
+      `UPDATE approval_requests
+         SET status = 'rejected', approver_id = ?, approver_note = ?, decided_at = NOW()
+       WHERE id = ?`,
+      [req.user.id, reason.trim(), ar.id]
+    );
+
+    await conn.query(
+      `UPDATE documents
+         SET status = 'Ditolak', catatan = ?, approval_status = 'rejected', approved_by = ?, approved_at = NOW(), updated_at = NOW()
+       WHERE id = ?`,
+      [reason.trim(), req.user.id, ar.document_id]
+    );
+
+    await conn.query(
+      `UPDATE approval_requests
+         SET status = 'rejected', approver_id = ?, approver_note = ?, decided_at = NOW()
+       WHERE document_id = ? AND status = 'pending' AND id != ?`,
+      [req.user.id, reason.trim(), ar.document_id, ar.id]
+    );
+
+    await addAudit(conn, ar.document_id, req.user.id, `Menolak dokumen: "${reason.trim()}"`, ar.id, { status: "Menunggu" }, { status: "Ditolak", alasan: reason.trim() });
+
+    await sendNotif(
+      conn, [doc.uploaded_by],
+      `Dokumen "${doc.judul}" ditolak. Alasan: ${reason.trim()}`,
+      "rejection", ar.document_id,
+      "Dokumen Ditolak"
+    );
+
+    await conn.commit();
+    res.json({ message: "Dokumen ditolak", request_id: ar.id });
+  } catch (e) {
+    await conn.rollback();
+    next(e);
+  } finally {
+    conn.release();
+  }
+});
+
+router.post("/:id/cancel", requirePermission("approvals.manage"), async (req, res, next) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[ar]] = await conn.query(
+      "SELECT * FROM approval_requests WHERE id = ? FOR UPDATE",
+      [req.params.id]
+    );
+    if (!ar) { await conn.rollback(); return res.status(404).json({ error: "Approval request tidak ditemukan" }); }
+
+    const isOwner = ar.requester_id === req.user.id;
+    const isAdmin = ["Kepala Sekolah", "Operator/TU"].includes(req.user.role);
+    if (!isOwner && !isAdmin) {
+      await conn.rollback();
+      return res.status(403).json({ error: "Hanya pemilik request atau admin yang dapat membatalkan" });
+    }
+
+    if (ar.status !== "pending") {
+      await conn.rollback();
+      return res.status(409).json({ error: `Request sudah berstatus '${ar.status}', tidak dapat dibatalkan` });
+    }
+
+    await conn.query(
+      "UPDATE approval_requests SET status = 'cancelled', decided_at = NOW() WHERE id = ?",
+      [ar.id]
+    );
+
+    await conn.query(
+      "UPDATE documents SET status = 'Ditolak', catatan = 'Pengajuan dibatalkan oleh pengguna', updated_at = NOW() WHERE id = ? AND status = 'Menunggu'",
+      [ar.document_id]
+    );
+
+    await addAudit(conn, ar.document_id, req.user.id, "Membatalkan pengajuan persetujuan", ar.id, { status: "Menunggu" }, { status: "Dibatalkan" });
+
+    await conn.commit();
+    res.json({ message: "Approval request dibatalkan", request_id: ar.id });
+  } catch (e) {
+    await conn.rollback();
+    next(e);
+  } finally {
+    conn.release();
+  }
+});
+
+module.exports = router;
