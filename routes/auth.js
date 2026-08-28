@@ -82,7 +82,6 @@ router.post("/login", async (req, res, next) => {
   try {
     const { identifier, password } = loginSchema.parse(req.body);
 
-    // Cari user berdasarkan email atau nama (case-insensitive untuk nama)
     const [rows] = await pool.query(
       "SELECT * FROM users WHERE email = ? OR LOWER(nama) = LOWER(?) LIMIT 1",
       [identifier, identifier]
@@ -134,7 +133,6 @@ router.post("/login", async (req, res, next) => {
       });
     }
 
-    // 2FA not active: issue JWT immediately
     const token = signToken(user);
 
     pool.query(
@@ -198,8 +196,6 @@ router.post("/verify-otp", otpLimiter, async (req, res, next) => {
       });
     }
 
-    // is_online diupdate lebih dulu (dibutuhkan agar status login konsisten),
-    // TAPI tidak diikutkan JSON.parse/proses berat apa pun setelah ini.
     await pool.query(
       "UPDATE users SET otp_used = 1, otp_attempts = 0, is_online = 1, last_seen_at = NOW() WHERE id = ?",
       [user.id]
@@ -358,7 +354,6 @@ router.post("/logout", authRequired, async (req, res, next) => {
   try {
     await pool.query("UPDATE users SET is_online = 0 WHERE id = ?", [req.user.id]);
 
-    // Fire-and-forget: jangan tahan response logout hanya demi menulis audit log
     logActivity(pool, {
       documentId: null,
       userId: req.user.id,

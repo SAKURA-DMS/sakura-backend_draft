@@ -82,9 +82,6 @@ async function sendNotif(conn, userIds, message, type, docId, eventLabel = "Noti
     [rows]
   );
 
-  // Kirim email notifikasi juga ke user yang mengaktifkan toggle "Email"
-  // di Pengaturan Sistem > Notifikasi. Kegagalan kirim email tidak
-  // mempengaruhi proses utama (tidak dilempar/tidak menggagalkan transaksi).
   try {
     const [emailTargets] = await conn.query(
       `SELECT id, nama, email FROM users

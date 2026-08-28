@@ -15,7 +15,6 @@ async function main() {
   try {
     const hasNotifEmailEnabled = await columnExists(conn, "users", "notif_email_enabled");
     if (!hasNotifEmailEnabled) {
-      // Default 1 (aktif) — sesuai keputusan: toggle Email default ON untuk semua user.
       await conn.query(
         "ALTER TABLE users ADD COLUMN notif_email_enabled TINYINT(1) NOT NULL DEFAULT 1 AFTER is_2fa_enabled"
       );

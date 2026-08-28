@@ -196,7 +196,6 @@ router.patch("/:id", async (req, res, next) => {
     const isSelf = targetId === req.user.id;
 
     if (!isSelf) {
-      // need permission users.manage
       const [perm] = await pool.query(
         `SELECT 1 FROM role_permissions rp JOIN permissions p ON p.permission_id = rp.permission_id
          WHERE rp.role_name = ? AND p.permission_key = 'users.manage'`,

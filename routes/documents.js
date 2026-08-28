@@ -19,11 +19,6 @@ const router = express.Router();
 router.use(authRequired);
 
 // Helpers
-
-// Kirim email notifikasi ke user (dari daftar userIds) yang mengaktifkan
-// toggle "Email" di Pengaturan Sistem > Notifikasi. Dipanggil setelah
-// notifikasi in-app dibuat; kegagalan kirim email tidak mempengaruhi
-// proses utama (tidak dilempar sebagai error).
 async function notifyEmailForUsers(conn, userIds, message, eventLabel) {
   if (!userIds || userIds.length === 0) return;
   try {
@@ -47,11 +42,6 @@ async function notifyEmailForUsers(conn, userIds, message, eventLabel) {
   }
 }
 
-
-// Format no. dokumen: [KODE_KATEGORI]-[KODE_JENIS]-[TAHUN]-[RUNNING_NUMBER]
-// Example: DS-IJZ-2026-000001
-// Running number auto-increment per KOMBINASI kategori + jenis (bukan per
-// jenis saja), dan reset ke 1 setiap tahun berganti.
 async function generateDocumentNumber(conn, categoryId, typeId) {
   const [[cat]] = await conn.query(
     "SELECT code_prefix FROM categories WHERE category_id = ?",
@@ -72,8 +62,6 @@ async function generateDocumentNumber(conn, categoryId, typeId) {
 
   const year = new Date().getFullYear();
 
-  // Kunci counter = kombinasi kategori + jenis, supaya "DS-IJZ" dan "DS-RPT"
-  // (atau "DG-GRU") masing-masing punya running number sendiri mulai dari 1.
   const comboPrefix = `${categoryCode}-${typeCode}`;
 
   const [[counter]] = await conn.query(
@@ -167,7 +155,6 @@ async function addAudit(
 }
 
 // Sensitive doc access helper 
-// Operator/TU & Kepala Sekolah tetap memiliki akses penuh.
 async function assertSensitiveAccess(conn, doc, user) {
   if (!doc.is_sensitive) return;
 
@@ -429,7 +416,6 @@ router.get("/:id", async (req, res, next) => {
       }
     }
 
-    // Catat "Melihat dokumen" ke audit trail (non-blocking)
     pool.query(
       `
       INSERT INTO audit_trail
@@ -897,7 +883,6 @@ router.post(
       }
     }
 
-    // Upload ke Supabase terlebih dahulu
     let blob;
 
     try {
@@ -1463,7 +1448,7 @@ router.patch(
   }
 );
 
-// ── POST /api/documents/:id/approve ──────────────────────────────────────────
+// POST /api/documents/:id/approve
 router.post(
   "/:id/approve",
   requirePermission("documents.approve"),
@@ -1610,7 +1595,7 @@ router.post(
   }
 );
 
-// ── POST /api/documents/:id/reject ───────────────────────────────────────────
+// POST /api/documents/:id/reject 
 router.post(
   "/:id/reject",
   requirePermission("documents.reject"),
@@ -1749,7 +1734,7 @@ router.post(
   }
 );
 
-// ── DELETE /api/documents/:id — soft delete ──────────────────────────────────
+// DELETE /api/documents/:id — soft delete 
 router.delete(
   "/:id",
   requirePermission("documents.delete"),
@@ -1798,7 +1783,7 @@ router.delete(
   }
 );
 
-// ── POST /api/documents/:id/restore ──────────────────────────────────────────
+// POST /api/documents/:id/restore
 router.post(
   "/:id/restore",
   requirePermission("documents.delete"),
@@ -1870,7 +1855,7 @@ router.post(
   }
 );
 
-// ── DELETE /api/documents/:id/permanent ──────────────────────────────────────
+// DELETE /api/documents/:id/permanent 
 router.delete(
   "/:id/permanent",
   requirePermission("documents.delete"),
@@ -1917,7 +1902,7 @@ router.delete(
   }
 );
 
-// ── insertMetadata ────────────────────────────────────────────────────────────
+// insertMetadata
 async function insertMetadata(
   conn,
   docId,

@@ -18,7 +18,6 @@ async function queryRows(sql, params = []) {
   const result = await db.query(sql, params);
 
   if (Array.isArray(result)) {
-    // mysql2/promise -> [rows, fields]
     if (Array.isArray(result[0])) {
       return result[0];
     }
